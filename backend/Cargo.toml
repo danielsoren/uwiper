@@ -1,8 +1,11 @@
 [package]
 name = "uwiper"
-version = "0.1.0"
-description = "Ultimate Wiper – uninstall apps and clean up everything they leave behind"
+version = "0.2.0-beta.1"
+description = "Uninstall Windows apps completely and wipe every trace they leave"
 edition = "2021"
+repository = "https://github.com/danielsoren/uwiper"
+homepage = "https://github.com/danielsoren/uwiper"
+keywords = ["windows", "uninstaller", "cleaner", "portable", "tauri"]
 publish = false
 
 [lib]

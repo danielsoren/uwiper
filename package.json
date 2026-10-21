@@ -1,8 +1,31 @@
 {
   "name": "uwiper",
   "private": true,
-  "version": "0.1.0",
-  "description": "Ultimate Wiper – uninstall apps and clean up everything they leave behind on Windows",
+  "version": "0.2.0-beta.1",
+  "description": "Uninstall Windows apps completely and wipe every trace they leave – portable, quarantine first",
+  "keywords": [
+    "windows",
+    "uninstaller",
+    "cleaner",
+    "leftovers",
+    "registry",
+    "disk-cleanup",
+    "quarantine",
+    "portable",
+    "privacy",
+    "tauri",
+    "rust",
+    "react"
+  ],
+  "homepage": "https://github.com/danielsoren/uwiper#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danielsoren/uwiper.git"
+  },
+  "bugs": {
+    "url": "https://github.com/danielsoren/uwiper/issues"
+  },
+  "author": "danielsoren",
   "type": "module",
   "scripts": {
     "dev": "vite",

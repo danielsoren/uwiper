@@ -127,7 +127,8 @@ function storage(): StorageInfo {
   };
 }
 
-const environment: Environment = { elevated: false, windows: true, material: 'none', home: HOME, version: '0.1.0' };
+// `?admin` in the URL previews the app with administrator rights.
+const environment: Environment = { elevated: new URLSearchParams(window.location.search).has('admin'), windows: true, material: 'none', home: HOME, version: '0.2.0-beta.1' };
 
 const DAY = 86_400;
 const now = () => Math.floor(Date.now() / 1000);

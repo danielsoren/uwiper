@@ -9,7 +9,7 @@ React 19 + TypeScript, styled with Tailwind CSS 4, state in zustand. This folder
 | `app/` | Entry point, app shell, `index.css` with the Tailwind theme | Only one of each |
 | `pages/` | One component per sidebar section | Composes components; no reusable pieces here |
 | `components/<area>/` | App-specific pieces: `layout/`, `apps/`, `settings/`, `cleanup/`… | Knows about the store, API or app data |
-| `ui/` | Primitives, one per file: `Button`, `Switch`, `Segmented`, `Pill`, `ListRow`… | Knows nothing about UWiper; import from `ui/` (the barrel) |
+| `ui/` | Primitives, one per file: `Button`, `Checkbox`, `Dialog`, `Switch`, `Skeleton`, `ListRow`… | Knows nothing about UWiper; import from `ui/` (the barrel) |
 | `store/` | `useAppStore` (zustand), `hooks.ts`, `selectors.ts` | State and data loading only |
 | `lib/` | `api.ts` (Rust commands), `types.ts`, `format.ts`, `cn.ts`, sample data | No React components |
 
@@ -24,6 +24,8 @@ If a new piece is generic enough to live in another app, it's a primitive (`ui/`
 
 ## Data
 
-Every Rust command is wrapped in `lib/api.ts`. Pages read data with `useResource('apps' | 'cleanup' | …)`, which loads it the first time it's needed and caches it for the session; `reload()` fetches it again.
+Every Rust command is wrapped in `lib/api.ts`. Pages read data with `useResource('apps' | 'cleanup' | …)`, which loads it the first time it's needed and caches it for the session; `reload()` fetches it again, and the store's `refresh(...)` reloads whatever an action changed.
 
-Outside Tauri (`npm run dev` in a browser) the same calls return sample data from `lib/fixtures.ts`, and the sidebar says so.
+While data loads, show a skeleton shaped like the content (`Skeleton`, `SkeletonRows`) rather than a spinner; buttons that start a scan take `busy`.
+
+Outside Tauri (`npm run dev` in a browser) the same calls return sample data from `lib/fixtures.ts`, and the sidebar says so. Add `?admin` to the URL to preview administrator mode and `?delay=3000` to slow the scans down.
