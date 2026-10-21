@@ -29,30 +29,45 @@ pub fn expand_env(input: &str) -> String {
     out
 }
 
-/// Pulls the executable out of a command line such as
-/// `"C:\Program Files\App\app.exe" --minimized` or `C:\Tools\app.exe -x`.
-pub fn command_executable(command: &str) -> Option<String> {
+/// The program part of a command line, as typed: the quoted part, or the
+/// shortest run of words that ends in an executable extension.
+fn program_token(command: &str) -> Option<&str> {
     let s = command.trim();
     if s.is_empty() {
         return None;
     }
-    let raw = if let Some(rest) = s.strip_prefix('"') {
-        rest.split('"').next()?.to_string()
-    } else {
-        // Unquoted paths may contain spaces: take the shortest run of words
-        // that ends in an executable extension, else just the first word.
-        const EXTS: [&str; 6] = [".exe", ".com", ".bat", ".cmd", ".dll", ".sys"];
-        let words: Vec<&str> = s.split(' ').collect();
-        (1..=words.len())
-            .map(|n| words[..n].join(" "))
-            .find(|cand| {
-                let lower = cand.to_ascii_lowercase();
-                EXTS.iter().any(|ext| lower.ends_with(ext))
-            })
-            .unwrap_or_else(|| words[0].to_string())
-    };
-    let expanded = expand_env(raw.trim());
+    if let Some(rest) = s.strip_prefix('"') {
+        let end = rest.find('"').unwrap_or(rest.len());
+        return Some(&s[..(end + 2).min(s.len())]);
+    }
+    // Unquoted paths may contain spaces: take the shortest run of words
+    // that ends in an executable extension, else just the first word.
+    const EXTS: [&str; 6] = [".exe", ".com", ".bat", ".cmd", ".dll", ".sys"];
+    let mut end = 0;
+    for word in s.split(' ') {
+        end += word.len();
+        if EXTS.iter().any(|ext| s[..end].to_ascii_lowercase().ends_with(ext)) {
+            return Some(&s[..end]);
+        }
+        end += 1;
+    }
+    Some(s.split(' ').next().unwrap_or(s))
+}
+
+/// Pulls the executable out of a command line such as
+/// `"C:\Program Files\App\app.exe" --minimized` or `C:\Tools\app.exe -x`.
+pub fn command_executable(command: &str) -> Option<String> {
+    let expanded = expand_env(program_token(command)?.trim_matches('"').trim());
     (!expanded.is_empty()).then_some(expanded)
+}
+
+/// Splits a command line into the program and its arguments, the arguments
+/// kept exactly as written.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn split_command(command: &str) -> Option<(String, String)> {
+    let token = program_token(command)?;
+    let args = command.trim()[token.len()..].trim().to_string();
+    Some((command_executable(command)?, args))
 }
 
 /// Like `command_executable`, but bare names such as `rundll32.exe` are looked
@@ -62,7 +77,11 @@ pub fn resolve_executable(command: &str) -> Option<String> {
     if exe.contains('\\') || exe.contains('/') {
         return Some(exe);
     }
-    let name = if Path::new(&exe).extension().is_some() { exe } else { format!("{exe}.exe") };
+    let name = if Path::new(&exe).extension().is_some() {
+        exe
+    } else {
+        format!("{exe}.exe")
+    };
     let windir = windows_dir();
     let mut dirs = vec![format!(r"{windir}\System32"), windir];
     if let Some(path) = std::env::var_os("PATH") {
@@ -76,6 +95,12 @@ pub fn resolve_executable(command: &str) -> Option<String> {
 
 pub fn windows_dir() -> String {
     std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string())
+}
+
+/// A program in System32, by full path, so nothing next to UWiper can stand in for it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn system32(name: &str) -> std::path::PathBuf {
+    Path::new(&windows_dir()).join("System32").join(name)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -122,6 +147,119 @@ pub fn is_windows_path(path: &str) -> bool {
     p.starts_with(&format!("{windir}\\"))
 }
 
+/// Lowercase, backslashes, no trailing separator: for comparing Windows paths.
+pub fn norm_path(path: &str) -> String {
+    path.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// The long form of a path that exists (`C:\PROGRA~1` → `C:\Program Files`),
+/// otherwise the path as given.
+pub fn long_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+        let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        let len = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        if len > 0 && len < buf.len() {
+            return String::from_utf16_lossy(&buf[..len]);
+        }
+    }
+    path.to_string()
+}
+
+/// `norm_path` of the long form: what two spellings of one folder share.
+pub fn canonical(path: &str) -> String {
+    norm_path(&long_path(path.trim()))
+}
+
+/// True when `path` is `root` or something inside it.
+pub fn is_within(path: &str, root: &str) -> bool {
+    let (p, r) = (norm_path(path), norm_path(root));
+    !r.is_empty() && (p == r || p.starts_with(&format!("{r}\\")))
+}
+
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `YYYY-MM-DD` in UTC for a Unix time.
+pub fn utc_date(secs: u64) -> String {
+    // Howard Hinnant's days-to-civil algorithm.
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Runs a tool from System32 (reg, sc, schtasks, powershell) without a
+/// console window. A non-zero exit becomes an error carrying its message.
+#[cfg(windows)]
+pub fn run_tool(name: &str, args: &[&str]) -> crate::error::Result<String> {
+    run_tool_with_env(name, args, &[])
+}
+
+/// `run_tool` with extra environment variables, for passing text that must
+/// not be parsed as part of a command (PowerShell scripts, for one).
+#[cfg(windows)]
+pub fn run_tool_with_env(name: &str, args: &[&str], env: &[(&str, &str)]) -> crate::error::Result<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let output = std::process::Command::new(system32(name))
+        .args(args)
+        .envs(env.iter().copied())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()?;
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+    if output.status.success() {
+        return Ok(text(&output.stdout));
+    }
+    let message = [text(&output.stderr), text(&output.stdout)]
+        .into_iter()
+        .find(|m| !m.is_empty())
+        .unwrap_or_default();
+    if message.to_lowercase().contains("access is denied") {
+        return Err(crate::error::Error::NeedsAdmin);
+    }
+    Err(crate::error::Error::Other(if message.is_empty() {
+        format!("{name} failed")
+    } else {
+        message
+    }))
+}
+
+/// Runs `f` on every item using a few threads; results keep the input order.
+pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<R>>> = Mutex::new(items.iter().map(|_| None).collect());
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                results.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    results.into_inner().unwrap().into_iter().flatten().collect()
+}
+
 /// Total size of all files below `path`, skipping anything unreadable.
 pub fn dir_size(path: &Path) -> (u64, u64) {
     let mut bytes = 0u64;
@@ -142,6 +280,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn splits_command_lines() {
+        assert_eq!(
+            split_command(r#""C:\Program Files\App\unins000.exe" /SILENT"#),
+            Some((r"C:\Program Files\App\unins000.exe".into(), "/SILENT".into()))
+        );
+        assert_eq!(
+            split_command(r"C:\Program Files\App\uninstall.exe --force now"),
+            Some((r"C:\Program Files\App\uninstall.exe".into(), "--force now".into()))
+        );
+        assert_eq!(
+            split_command("MsiExec.exe /X{1234}"),
+            Some(("MsiExec.exe".into(), "/X{1234}".into()))
+        );
+        assert_eq!(
+            split_command(r#""C:\App\u.exe""#),
+            Some((r"C:\App\u.exe".into(), String::new()))
+        );
+    }
+
+    #[test]
+    fn compares_windows_paths() {
+        assert!(is_within(r"C:\Program Files\App\bin", r"c:\program files\app\"));
+        assert!(is_within(r"C:\Program Files\App", r"C:\Program Files\App"));
+        assert!(!is_within(r"C:\Program Files\App2", r"C:\Program Files\App"));
+        assert!(!is_within(r"C:\x", ""));
+    }
+
+    #[test]
+    fn formats_utc_dates() {
+        assert_eq!(utc_date(0), "1970-01-01");
+        assert_eq!(utc_date(1_792_540_800), "2026-10-21");
+        assert_eq!(utc_date(951_782_400), "2000-02-29");
+    }
+
+    #[test]
+    fn parallel_map_keeps_order() {
+        let items: Vec<u32> = (0..100).collect();
+        assert_eq!(
+            parallel_map(&items, |n| n * 2),
+            items.iter().map(|n| n * 2).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn expands_known_and_keeps_unknown_variables() {
         std::env::set_var("UWIPER_TEST_DIR", r"C:\Data");
         assert_eq!(expand_env(r"%UWIPER_TEST_DIR%\cache"), r"C:\Data\cache");
@@ -159,7 +341,10 @@ mod tests {
             command_executable(r"C:\Program Files\App\app.exe /background").as_deref(),
             Some(r"C:\Program Files\App\app.exe")
         );
-        assert_eq!(command_executable("rundll32 shell32.dll,Foo").as_deref(), Some("rundll32"));
+        assert_eq!(
+            command_executable("rundll32 shell32.dll,Foo").as_deref(),
+            Some("rundll32")
+        );
         assert_eq!(
             command_executable(r"C:\Windows\system32\svchost.exe -k netsvcs").as_deref(),
             Some(r"C:\Windows\system32\svchost.exe")
@@ -170,8 +355,14 @@ mod tests {
     #[test]
     fn normalizes_service_paths() {
         std::env::set_var("SystemRoot", r"C:\Windows");
-        assert_eq!(normalize_system_path(r"\SystemRoot\System32\drivers\x.sys"), r"C:\Windows\System32\drivers\x.sys");
-        assert_eq!(normalize_system_path(r"System32\drivers\y.sys"), r"C:\Windows\System32\drivers\y.sys");
+        assert_eq!(
+            normalize_system_path(r"\SystemRoot\System32\drivers\x.sys"),
+            r"C:\Windows\System32\drivers\x.sys"
+        );
+        assert_eq!(
+            normalize_system_path(r"System32\drivers\y.sys"),
+            r"C:\Windows\System32\drivers\y.sys"
+        );
         assert_eq!(normalize_system_path(r"\??\D:\Tools\svc.exe"), r"D:\Tools\svc.exe");
         assert_eq!(normalize_system_path("svchost.exe"), r"C:\Windows\System32\svchost.exe");
     }

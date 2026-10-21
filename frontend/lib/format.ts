@@ -12,6 +12,14 @@ export function plural(n: number, one: string, many: string): string {
   return `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
 }
 
+/** "today", "yesterday", "3 days ago" for a Unix time in seconds. */
+export function daysAgo(unixSeconds: number): string {
+  const days = Math.floor((Date.now() / 1000 - unixSeconds) / 86_400);
+  if (days <= 0) return 'Today';
+  if (days === 1) return 'Yesterday';
+  return `${days} days ago`;
+}
+
 export function formatDate(iso: string | null): string {
   if (!iso) return '–';
   const d = new Date(`${iso}T00:00:00`);

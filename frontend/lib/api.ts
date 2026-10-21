@@ -1,8 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AppRef,
+  Batch,
+  CleanReport,
   CleanupItem,
   Environment,
   InstalledApp,
+  Leftover,
+  Removal,
+  RemoveReport,
+  RestorePoint,
+  RestoreReport,
   ServiceItem,
   Settings,
   StartupItem,
@@ -22,7 +30,6 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export const api = {
   environment: () => call<Environment>('environment'),
   listApps: () => call<InstalledApp[]>('list_apps'),
-  folderSize: (path: string) => call<number>('folder_size', { path }),
   scanCleanup: () => call<CleanupItem[]>('scan_cleanup'),
   listStartup: () => call<StartupItem[]>('list_startup'),
   listServices: () => call<ServiceItem[]>('list_services'),
@@ -33,6 +40,16 @@ export const api = {
   restartAsAdmin: () => call<void>('restart_as_admin'),
   openFolder: (path: string) => call<void>('open_folder', { path }),
   revealPath: (path: string) => call<void>('reveal_path', { path }),
+
+  createRestorePoint: (appName: string) => call<RestorePoint>('create_restore_point', { appName }),
+  startUninstall: (id: string, quiet: boolean) => call<void>('start_uninstall', { id, quiet }),
+  uninstallFinished: (id: string) => call<boolean>('uninstall_finished', { id }),
+  scanLeftovers: (app: AppRef) => call<Leftover[]>('scan_leftovers', { app }),
+  removeItems: (title: string, items: Removal[]) => call<RemoveReport>('remove_items', { title, items }),
+  listQuarantine: () => call<Batch[]>('list_quarantine'),
+  restoreBatch: (id: string) => call<RestoreReport>('restore_batch', { id }),
+  deleteBatch: (id: string) => call<void>('delete_batch', { id }),
+  cleanCaches: (ids: string[]) => call<CleanReport>('clean_caches', { ids }),
 };
 
 export async function pickFolder(title: string): Promise<string | null> {

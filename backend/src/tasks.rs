@@ -6,28 +6,30 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::{blocking, Error, Result};
+use crate::targets::Target;
 use crate::util::{expand_env, file_state, resolve_executable};
 
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskItem {
-    name: String,
+    pub(crate) name: String,
     folder: String,
     command: Option<String>,
     arguments: Option<String>,
-    binary: Option<String>,
+    pub(crate) binary: Option<String>,
     file_exists: Option<bool>,
     enabled: bool,
     triggers: String,
-    is_windows: bool,
+    pub(crate) is_windows: bool,
+    pub(crate) removal: Target,
 }
 
 #[tauri::command]
 pub async fn list_tasks() -> Result<Vec<TaskItem>> {
-    blocking(scan).await
+    blocking(list).await
 }
 
-fn scan() -> Result<Vec<TaskItem>> {
+pub fn list() -> Result<Vec<TaskItem>> {
     if !cfg!(windows) {
         return Err(Error::Unsupported);
     }
@@ -38,7 +40,9 @@ fn scan() -> Result<Vec<TaskItem>> {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                denied |= e.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
+                denied |= e
+                    .io_error()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
                 continue;
             }
         };
@@ -69,7 +73,13 @@ fn decode(bytes: &[u8]) -> Option<String> {
     let utf16 = |data: &[u8], le: bool| {
         let units: Vec<u16> = data
             .chunks_exact(2)
-            .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
             .collect();
         String::from_utf16(&units).ok()
     };
@@ -125,7 +135,10 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
     }
 
     let name = rel.to_string_lossy().replace('/', "\\");
-    let folder = rel.parent().map(|p| p.to_string_lossy().replace('/', "\\")).unwrap_or_default();
+    let folder = rel
+        .parent()
+        .map(|p| p.to_string_lossy().replace('/', "\\"))
+        .unwrap_or_default();
     let binary = command.as_deref().and_then(resolve_executable);
     Some(TaskItem {
         is_windows: name.starts_with("Microsoft\\"),
@@ -134,8 +147,15 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
         command,
         arguments,
         enabled,
-        triggers: if triggers.is_empty() { "On demand".into() } else { triggers.join(", ") },
+        triggers: if triggers.is_empty() {
+            "On demand".into()
+        } else {
+            triggers.join(", ")
+        },
         folder,
+        removal: Target::Task {
+            path: format!(r"\{name}"),
+        },
         name,
     })
 }

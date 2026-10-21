@@ -5,22 +5,28 @@
 use serde::Serialize;
 
 use crate::error::{blocking, Result};
+use crate::targets::Target;
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceItem {
-    name: String,
-    display_name: String,
-    binary: Option<String>,
+    pub(crate) name: String,
+    pub(crate) display_name: String,
+    pub(crate) binary: Option<String>,
     file_exists: Option<bool>,
     start_type: &'static str,
     delayed: bool,
-    is_windows: bool,
+    pub(crate) is_windows: bool,
+    pub(crate) removal: Target,
 }
 
 #[tauri::command]
 pub async fn list_services() -> Result<Vec<ServiceItem>> {
-    blocking(imp::list).await
+    blocking(list).await
+}
+
+pub fn list() -> Result<Vec<ServiceItem>> {
+    imp::list()
 }
 
 fn start_type(start: u32) -> &'static str {
@@ -75,7 +81,12 @@ mod imp {
             let image = key.get_value::<String, _>("ImagePath").ok();
             let binary = service_dll
                 .map(|dll| normalize_system_path(&expand_env(&dll)))
-                .or_else(|| image.as_deref().and_then(command_executable).map(|exe| normalize_system_path(&exe)));
+                .or_else(|| {
+                    image
+                        .as_deref()
+                        .and_then(command_executable)
+                        .map(|exe| normalize_system_path(&exe))
+                });
             let display_name = key
                 .get_value::<String, _>("DisplayName")
                 .ok()
@@ -88,6 +99,7 @@ mod imp {
                 start_type: start_type(key.get_value("Start").unwrap_or(3)),
                 delayed: key.get_value::<u32, _>("DelayedAutostart").unwrap_or(0) == 1,
                 display_name,
+                removal: Target::Service { name: name.clone() },
                 name,
             });
         }

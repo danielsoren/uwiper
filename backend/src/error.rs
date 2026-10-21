@@ -4,7 +4,7 @@ use serde::{Serialize, Serializer};
 pub enum Error {
     #[error("This only works on Windows")]
     Unsupported,
-    #[error("Run UWiper as administrator to read this")]
+    #[error("Needs administrator rights – restart UWiper as administrator")]
     NeedsAdmin,
     #[error(transparent)]
     Io(#[from] std::io::Error),

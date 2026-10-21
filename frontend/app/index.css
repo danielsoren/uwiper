@@ -14,11 +14,12 @@
   color-scheme: dark;
 }
 
-/* Mica (Windows 11): let the desktop tint show through. */
+/* Mica (Windows 11): the wallpaper tints the window. The sidebar shows it in
+   full, the content area keeps a dark veil so text stays easy to read. */
 :root[data-material='mica'] {
   --surface-window: transparent;
-  --surface-sidebar: rgba(255, 255, 255, 0.025);
-  --surface-main: rgba(18, 18, 20, 0.55);
+  --surface-sidebar: transparent;
+  --surface-main: rgba(16, 16, 18, 0.42);
 }
 
 @theme inline {
@@ -75,6 +76,47 @@
   --radius-control: 9px;
   --radius-tile: 10px;
   --radius-card: 14px;
+}
+
+/* Loading placeholders: a soft highlight sweeping across. */
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@utility skeleton {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.05) 30%, rgba(255, 255, 255, 0.1) 50%, rgba(255, 255, 255, 0.05) 70%);
+  background-size: 200% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+@utility fade-in {
+  animation: fade-in 0.25s ease-out;
+}
+
+@utility dialog-in {
+  animation: dialog-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 @utility scroll-thin {

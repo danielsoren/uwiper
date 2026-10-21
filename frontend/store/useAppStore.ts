@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, errorText } from '../lib/api';
 import type {
+  Batch,
   CleanupItem,
   Environment,
   InstalledApp,
@@ -21,6 +22,7 @@ export interface Resources {
   services: ServiceItem[];
   tasks: TaskItem[];
   storage: StorageInfo;
+  quarantine: Batch[];
 }
 
 export type ResourceKey = keyof Resources;
@@ -39,6 +41,7 @@ const FETCH: { [K in ResourceKey]: () => Promise<Resources[K]> } = {
   services: api.listServices,
   tasks: api.listTasks,
   storage: api.storageInfo,
+  quarantine: api.listQuarantine,
 };
 
 const idle = <T>(): Resource<T> => ({ data: null, error: null, loading: false, requested: false });
@@ -50,6 +53,8 @@ export interface Toast {
 
 interface AppState {
   page: Page;
+  /** False until the first data has loaded; the splash screen shows meanwhile. */
+  ready: boolean;
   env: Environment | null;
   settings: Settings | null;
   res: { [K in ResourceKey]: Resource<Resources[K]> };
@@ -59,6 +64,8 @@ interface AppState {
   init: () => void;
   /** Loads once per session; `force` loads again. */
   load: <K extends ResourceKey>(key: K, force?: boolean) => void;
+  /** Loads again whatever of these was loaded before, after something changed. */
+  refresh: (...keys: ResourceKey[]) => void;
   /** Applies a change right away and saves it; a failed save rolls it back. */
   updateSettings: (change: (s: Settings) => Settings) => void;
   notify: (text: string) => void;
@@ -68,21 +75,36 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>()((set, get) => {
+  let started = false;
   const patch = <K extends ResourceKey>(key: K, change: Partial<Resource<Resources[K]>>) =>
     set((s) => ({ res: { ...s.res, [key]: { ...s.res[key], ...change } } }));
 
   return {
     page: 'overview',
+    ready: false,
     env: null,
     settings: null,
-    res: { apps: idle(), cleanup: idle(), startup: idle(), services: idle(), tasks: idle(), storage: idle() },
+    res: {
+      apps: idle(),
+      cleanup: idle(),
+      startup: idle(),
+      services: idle(),
+      tasks: idle(),
+      storage: idle(),
+      quarantine: idle(),
+    },
     toasts: [],
 
     go: (page) => set({ page }),
 
     init: () => {
-      api.environment().then((env) => set({ env }), (e) => get().notify(errorText(e)));
-      api.getSettings().then((settings) => set({ settings }), (e) => get().notify(errorText(e)));
+      if (started) return;
+      started = true;
+      const env = api.environment().then((env) => set({ env }), (e) => get().notify(errorText(e)));
+      const settings = api.getSettings().then((settings) => set({ settings }), (e) => get().notify(errorText(e)));
+      // Settings shows these numbers, so measure them before the first screen.
+      get().load('storage');
+      Promise.all([env, settings]).then(() => set({ ready: true }));
     },
 
     load: (key, force = false) => {
@@ -93,6 +115,10 @@ export const useAppStore = create<AppState>()((set, get) => {
         (data) => patch(key, { data, loading: false }),
         (e) => patch(key, { error: errorText(e), loading: false }),
       );
+    },
+
+    refresh: (...keys) => {
+      for (const key of keys) if (get().res[key].requested) get().load(key, true);
     },
 
     updateSettings: (change) => {

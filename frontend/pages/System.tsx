@@ -11,11 +11,11 @@ import {
   IconTile,
   ListCard,
   ListRow,
-  Loading,
   Note,
   Pill,
   SegmentCount,
   Segmented,
+  SkeletonRows,
   Switch,
   type IconName,
   type PillTone,
@@ -131,13 +131,13 @@ export function System() {
 
       <PageBody>
         {tab === 'drivers' || !resource ? (
-          <Empty icon="cpu" title="Driver packages arrive in v0.2">
+          <Empty icon="cpu" title="Driver packages arrive in v0.3">
             UWiper will list the third-party driver packages in the Driver Store and show which ones no device uses anymore – old
             GPU drivers alone can take gigabytes.
           </Empty>
         ) : (
           <>
-            <Note>{HINT[tab as Exclude<Tab, 'drivers'>]} Read-only in this version.</Note>
+            <Note>{HINT[tab as Exclude<Tab, 'drivers'>]} Entries that point to missing files can be removed on the Leftovers page.</Note>
             {resource.error && (
               <Callout
                 message={resource.error}
@@ -145,7 +145,7 @@ export function System() {
                 onAction={resource.error.includes('administrator') ? restartAsAdmin : resource.reload}
               />
             )}
-            {resource.loading && !resource.data && <Loading label="Reading…" />}
+            {resource.loading && !resource.data && <SkeletonRows rows={8} />}
             {resource.data && visible.length === 0 && (
               <Empty icon="check" title={problemsOnly ? 'No problems here' : 'Nothing to show'}>
                 {hideWindows && !problemsOnly ? 'Windows items are hidden.' : undefined}

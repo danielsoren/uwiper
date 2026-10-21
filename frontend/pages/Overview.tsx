@@ -6,9 +6,10 @@ import { formatBytes, plural } from '../lib/format';
 import { useResource } from '../store/hooks';
 import { brokenEntries } from '../store/selectors';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Card, Icon, IconTile, Spinner } from '../ui';
+import { Button, Card, Icon, IconTile, Skeleton } from '../ui';
 
 function BigNumber({ bytes }: { bytes: number }) {
+  if (bytes <= 0) return <div className="mt-2 text-hero font-bold leading-none tracking-[-0.035em]">All clean</div>;
   const [value, unit] = formatBytes(bytes).split(' ');
   return (
     <div className="mt-2 text-hero font-bold leading-none tracking-[-0.035em]">
@@ -28,20 +29,21 @@ export function Overview() {
   const services = useResource('services');
   const tasks = useResource('tasks');
   const storage = useResource('storage');
+  const quarantine = useResource('quarantine');
 
-  const rescan = () => [cleanup, apps, startup, services, tasks, storage].forEach((r) => r.reload());
+  const rescan = () => [cleanup, apps, startup, services, tasks, storage, quarantine].forEach((r) => r.reload());
 
   const items = cleanup.data ?? [];
   const safeBytes = items.filter((i) => i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
   const optionalBytes = items.filter((i) => !i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
   const broken = brokenEntries(startup.data, services.data, tasks.data);
-  const reportedBytes = (apps.data ?? []).reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
+  const appBytes = (apps.data ?? []).reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
   const outside = (storage.data?.dirs ?? []).filter((d) => !d.inside).length + (settings?.footprint.startWithWindows ? 1 : 0);
 
   return (
     <>
-      <PageHeader title="Overview" subtitle="A read-only look at your PC – this version shows, it doesn't remove anything yet">
-        <Button icon="refresh" onClick={rescan}>
+      <PageHeader title="Overview" subtitle="Your PC at a glance – what takes space and what removed apps left behind">
+        <Button icon="refresh" onClick={rescan} busy={[cleanup, apps, startup, services, tasks].some((r) => r.loading)}>
           Scan again
         </Button>
       </PageHeader>
@@ -50,10 +52,7 @@ export function Overview() {
           <div className="min-w-0 flex-[1_1_280px]">
             <h2 className="text-small font-semibold uppercase tracking-[.06em] text-fg-3">Caches you could free</h2>
             {cleanup.loading && !cleanup.data ? (
-              <div className="mt-2 flex h-14 items-center gap-3 text-fg-3">
-                <Spinner size={26} />
-                Measuring caches…
-              </div>
+              <Skeleton className="mt-2 h-14 w-52 rounded-xl" />
             ) : (
               <BigNumber bytes={safeBytes} />
             )}
@@ -75,7 +74,7 @@ export function Overview() {
             value={apps.data ? String(apps.data.length) : null}
             loading={apps.loading}
             label="Installed apps"
-            sub={apps.error ?? `${formatBytes(reportedBytes)} reported by installers`}
+            sub={apps.error ?? (apps.data ? `${formatBytes(appBytes)} on disk` : 'Measuring sizes…')}
             onClick={() => go('apps')}
           />
           <StatCard
@@ -93,10 +92,22 @@ export function Overview() {
             value={startup.data ? String(startup.data.filter((i) => i.enabled).length) : null}
             loading={startup.loading}
             label="Start with Windows"
-            sub={startup.error ?? `${plural(startup.data?.length ?? 0, 'entry', 'entries')} in total`}
+            sub={startup.error ?? (startup.data ? `${plural(startup.data.length, 'entry', 'entries')} in total` : 'Reading…')}
             onClick={() => go('system')}
           />
-          <StatCard icon="archive" tone="green" value="Empty" label="Quarantine" sub="Nothing has been removed yet" onClick={() => go('quarantine')} />
+          <StatCard
+            icon="archive"
+            tone="green"
+            value={quarantine.data ? (quarantine.data.length ? String(quarantine.data.length) : 'Empty') : null}
+            loading={quarantine.loading}
+            label="Quarantine"
+            sub={
+              quarantine.data?.length
+                ? `${plural(quarantine.data.reduce((s, b) => s + b.items.length, 0), 'item', 'items')} ready to put back`
+                : 'Nothing has been removed yet'
+            }
+            onClick={() => go('quarantine')}
+          />
         </div>
 
         <div className="flex flex-wrap gap-4 [&>*]:min-w-0 [&>*]:flex-[1_1_320px]">
@@ -127,8 +138,10 @@ export function Overview() {
             </div>
             <ul className="flex flex-col gap-2.5">
               {[
-                'This version only reads – it never changes your system',
-                `Removals will go to quarantine first, restorable for ${settings?.safety.keepDays ?? 30} days`,
+                settings?.safety.quarantine === false
+                  ? 'Quarantine is off – removals are permanent'
+                  : `Everything removed goes to quarantine first, restorable for ${settings?.safety.keepDays ?? 30} days`,
+                'You review every leftover before anything is removed',
                 'Windows components are never offered for removal',
               ].map((line) => (
                 <li key={line} className="flex items-start gap-2.5 text-meta leading-[1.45] text-fg-2">

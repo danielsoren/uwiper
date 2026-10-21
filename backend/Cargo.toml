@@ -1,8 +1,11 @@
 [package]
 name = "uwiper"
-version = "0.1.0"
-description = "Ultimate Wiper – uninstall apps and clean up everything they leave behind"
+version = "0.2.0-beta.1"
+description = "Uninstall Windows apps completely and wipe every trace they leave"
 edition = "2021"
+repository = "https://github.com/danielsoren/uwiper"
+homepage = "https://github.com/danielsoren/uwiper"
+keywords = ["windows", "uninstaller", "cleaner", "portable", "tauri"]
 publish = false
 
 [lib]
@@ -22,13 +25,17 @@ thiserror = "2"
 toml = "1"
 walkdir = "2"
 roxmltree = "0.21"
+png = "0.18"
+base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 window-vibrancy = "0.8"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Graphics_Gdi",
   "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

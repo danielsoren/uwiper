@@ -2,7 +2,9 @@
 // apps, settings or the store lives in components/ instead.
 export { Button, type ButtonKind } from './Button';
 export { Card, GroupTitle } from './Card';
+export { Checkbox } from './Checkbox';
 export { Chip, Swatch } from './Chip';
+export { Dialog } from './Dialog';
 export { Empty } from './Empty';
 export { Field } from './Field';
 export { Icon, type IconName } from './Icon';
@@ -12,5 +14,6 @@ export { ListCard, ListRow } from './List';
 export { Callout, Note } from './Note';
 export { Pill, Tag, type PillTone } from './Pill';
 export { SegmentCount, Segmented } from './Segmented';
+export { Skeleton, SkeletonRows } from './Skeleton';
 export { Loading, Spinner } from './Spinner';
 export { Switch } from './Switch';

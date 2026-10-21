@@ -38,7 +38,7 @@ export function CacheBreakdown({
     bytes: g.bytes,
     color: CLEANUP_GROUPS[g.group].color,
     label: CLEANUP_GROUPS[g.group].label,
-  }));
+  })).filter((p) => p.bytes > 0);
 
   return (
     <div className="flex min-w-0 flex-[1_1_340px] flex-col gap-3">

@@ -8,7 +8,7 @@ use tauri::State;
 
 use crate::error::{blocking, Result};
 use crate::settings::Settings;
-use crate::util::{dir_size, expand_env};
+use crate::util::{dir_size, expand_env, is_within};
 use crate::AppState;
 
 /// The UWiper folder. `UWIPER_HOME` overrides it; debug builds use a folder
@@ -70,10 +70,19 @@ pub struct StorageInfo {
 }
 
 fn is_inside(path: &Path, root: &Path) -> bool {
-    let p = path.to_string_lossy().to_ascii_lowercase();
-    let r = root.to_string_lossy().to_ascii_lowercase();
-    let r = r.trim_end_matches(['\\', '/']);
-    p == r || p.starts_with(&format!("{r}\\")) || p.starts_with(&format!("{r}/"))
+    is_within(&path.to_string_lossy(), &root.to_string_lossy())
+}
+
+/// Counts only what UWiper put in its folder, so keeping the exe in a big
+/// folder like Downloads doesn't mean walking all of it.
+fn own_size(home: &Path, dirs: &[DataDir]) -> u64 {
+    let file_len = |path: PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let exe = std::env::current_exe()
+        .ok()
+        .filter(|exe| exe.parent() == Some(home))
+        .map_or(0, file_len);
+    let inside: u64 = dirs.iter().filter(|d| d.inside).map(|d| d.size_bytes).sum();
+    exe + file_len(settings_file()) + dir_size(&webview_dir()).0 + inside
 }
 
 #[tauri::command]
@@ -81,7 +90,7 @@ pub async fn storage_info(state: State<'_, AppState>) -> Result<StorageInfo> {
     let settings = state.settings.lock().unwrap().clone();
     blocking(move || {
         let home = home();
-        let dirs = DATA_DIRS
+        let dirs: Vec<DataDir> = DATA_DIRS
             .iter()
             .map(|&key| {
                 let path = data_dir(&settings, key);
@@ -95,7 +104,7 @@ pub async fn storage_info(state: State<'_, AppState>) -> Result<StorageInfo> {
             })
             .collect();
         Ok(StorageInfo {
-            home_size_bytes: dir_size(&home).0,
+            home_size_bytes: own_size(&home, &dirs),
             home: home.to_string_lossy().into_owned(),
             settings_file: settings_file().to_string_lossy().into_owned(),
             dirs,

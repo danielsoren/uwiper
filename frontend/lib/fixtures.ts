@@ -2,9 +2,14 @@
 // Never used inside the real app – there every call goes to Rust.
 
 import type {
+  AppRef,
+  Batch,
   CleanupItem,
   Environment,
   InstalledApp,
+  Leftover,
+  Removal,
+  RemoveReport,
   ServiceItem,
   Settings,
   StartupItem,
@@ -32,6 +37,9 @@ const app = (
   installLocation: location,
   installDate: date,
   sizeBytes: sizeMb * MB,
+  reportedBytes: sizeMb * MB,
+  folderBytes: location ? sizeMb * MB : null,
+  icon: null,
   source,
   scope,
   arch: scope === 'user' ? null : 'x64',
@@ -40,7 +48,7 @@ const app = (
   registryKey: `HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${name}`,
 });
 
-const apps: InstalledApp[] = [
+let apps: InstalledApp[] = [
   app('7-Zip 25.01 (x64)', 'Igor Pavlov', '25.01', 6, '2026-10-11', 'C:\\Program Files\\7-Zip'),
   app('Discord', 'Discord Inc.', '1.0.9168', 512, '2026-08-02', 'C:\\Users\\you\\AppData\\Local\\Discord', 'win32', 'user'),
   app('Docker Desktop', 'Docker Inc.', '4.44.3', 3280, '2026-10-02', 'C:\\Program Files\\Docker\\Docker'),
@@ -55,7 +63,7 @@ const apps: InstalledApp[] = [
   app('Microsoft Visual C++ 2015-2022 Redistributable (x64)', 'Microsoft Corporation', '14.44.35211.0', 21, '2026-05-02', null, 'msi'),
 ];
 
-const cleanup: CleanupItem[] = [
+let cleanup: CleanupItem[] = [
   { id: 'temp', group: 'windows', name: 'Temporary files', description: '%TEMP% and Windows\\Temp', defaultOn: true, sizeBytes: 1340 * MB, fileCount: 18211, paths: ['C:\\Users\\you\\AppData\\Local\\Temp', 'C:\\Windows\\Temp'] },
   { id: 'windows-update', group: 'windows', name: 'Windows Update cache', description: 'Downloaded packages for updates that are already installed', defaultOn: true, sizeBytes: 860 * MB, fileCount: 412, paths: ['C:\\Windows\\SoftwareDistribution\\Download'] },
   { id: 'crash-dumps', group: 'windows', name: 'Crash reports & memory dumps', description: 'Windows Error Reporting, minidumps', defaultOn: true, sizeBytes: 412 * MB, fileCount: 37, paths: ['C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive'] },
@@ -67,27 +75,31 @@ const cleanup: CleanupItem[] = [
   { id: 'discord', group: 'apps', name: 'Discord – cache', description: 'Images and media from chats', defaultOn: true, sizeBytes: 210 * MB, fileCount: 3011, paths: ['C:\\Users\\you\\AppData\\Roaming\\discord\\Cache'] },
 ];
 
-const startup: StartupItem[] = [
+const RUN = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+let startup: StartupItem[] = ([
   { id: '1', name: 'Discord', command: '"C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe" --processStart Discord.exe', location: 'HKCU\\…\\Run', target: 'C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe', fileExists: true, enabled: true, isWindows: false },
   { id: '2', name: 'Docker Desktop', command: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe -Autostart', location: 'HKCU\\…\\Run', target: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe', fileExists: true, enabled: true, isWindows: false },
   { id: '3', name: 'RazerCentral', command: '"C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe" /silent', location: 'HKLM\\…\\Run (32-bit)', target: 'C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe', fileExists: false, enabled: true, isWindows: false },
   { id: '4', name: 'Steam', command: '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent', location: 'HKCU\\…\\Run', target: 'C:\\Program Files (x86)\\Steam\\steam.exe', fileExists: true, enabled: false, isWindows: false },
   { id: '5', name: 'SecurityHealth', command: '%windir%\\system32\\SecurityHealthSystray.exe', location: 'HKLM\\…\\Run', target: 'C:\\Windows\\system32\\SecurityHealthSystray.exe', fileExists: true, enabled: true, isWindows: true },
-];
+] as Omit<StartupItem, 'removal'>[]).map((i) => ({
+  ...i,
+  removal: { kind: 'registryValue', key: i.location.startsWith('HKLM') ? RUN.replace('HKCU\\Software', 'HKLM\\SOFTWARE\\WOW6432Node') : RUN, name: i.name },
+}));
 
-const services: ServiceItem[] = [
+let services: ServiceItem[] = ([
   { name: 'AdobeARMservice', displayName: 'Adobe Acrobat Update Service', binary: 'C:\\Program Files (x86)\\Common Files\\Adobe\\ARM\\1.0\\armsvc.exe', fileExists: false, startType: 'automatic', delayed: false, isWindows: false },
   { name: 'com.docker.service', displayName: 'Docker Desktop Service', binary: 'C:\\Program Files\\Docker\\Docker\\com.docker.service', fileExists: true, startType: 'manual', delayed: false, isWindows: false },
   { name: 'LGHUBUpdaterService', displayName: 'LGHUB Updater Service', binary: 'C:\\Program Files\\LGHUB\\lghub_updater.exe', fileExists: true, startType: 'automatic', delayed: false, isWindows: false },
   { name: 'Steam Client Service', displayName: 'Steam Client Service', binary: 'C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe', fileExists: true, startType: 'manual', delayed: false, isWindows: false },
   { name: 'wuauserv', displayName: 'Windows Update', binary: 'C:\\Windows\\system32\\wuaueng.dll', fileExists: true, startType: 'manual', delayed: false, isWindows: true },
-];
+] as Omit<ServiceItem, 'removal'>[]).map((i) => ({ ...i, removal: { kind: 'service', name: i.name } }));
 
-const tasks: TaskItem[] = [
+let tasks: TaskItem[] = ([
   { name: 'Adobe Acrobat Update Task', folder: '', command: 'C:\\Program Files (x86)\\Common Files\\Adobe\\ARM\\1.0\\AdobeARM.exe', arguments: null, binary: 'C:\\Program Files (x86)\\Common Files\\Adobe\\ARM\\1.0\\AdobeARM.exe', fileExists: false, enabled: true, triggers: 'At log on, On a schedule', isWindows: false },
   { name: 'GoogleUpdaterTaskSystem', folder: '', command: 'C:\\Program Files (x86)\\Google\\GoogleUpdater\\updater.exe', arguments: '--wake', binary: 'C:\\Program Files (x86)\\Google\\GoogleUpdater\\updater.exe', fileExists: true, enabled: true, triggers: 'On a schedule', isWindows: false },
   { name: 'Microsoft\\Windows\\Defrag\\ScheduledDefrag', folder: 'Microsoft\\Windows\\Defrag', command: '%windir%\\system32\\defrag.exe', arguments: '-c -h -o -$', binary: 'C:\\Windows\\system32\\defrag.exe', fileExists: true, enabled: true, triggers: 'On a schedule', isWindows: true },
-];
+] as Omit<TaskItem, 'removal'>[]).map((i) => ({ ...i, removal: { kind: 'task', path: `\\${i.name}` } }));
 
 let settings: Settings = {
   storage: { oneFolder: true, quarantine: null, snapshots: null, logs: null, temp: null, logDays: 30 },
@@ -115,17 +127,75 @@ function storage(): StorageInfo {
   };
 }
 
-const environment: Environment = { elevated: false, windows: true, material: 'none', home: HOME, version: '0.1.0' };
+// `?admin` in the URL previews the app with administrator rights.
+const environment: Environment = { elevated: new URLSearchParams(window.location.search).has('admin'), windows: true, material: 'none', home: HOME, version: '0.2.0-beta.1' };
+
+const DAY = 86_400;
+const now = () => Math.floor(Date.now() / 1000);
+
+let batches: Batch[] = [
+  {
+    id: 'sample',
+    title: 'Uninstall Razer Synapse',
+    createdAt: now() - 3 * DAY,
+    items: [
+      { label: 'C:\\Program Files (x86)\\Razer\\Synapse3', target: { kind: 'path', path: 'C:\\Program Files (x86)\\Razer\\Synapse3' }, sizeBytes: 312 * MB, note: null },
+      { label: 'C:\\Users\\you\\AppData\\Local\\Razer', target: { kind: 'path', path: 'C:\\Users\\you\\AppData\\Local\\Razer' }, sizeBytes: 88 * MB, note: null },
+      { label: 'HKCU\\Software\\Razer', target: { kind: 'registryKey', key: 'HKCU\\Software\\Razer' }, sizeBytes: 0, note: null },
+      { label: 'Service Razer Synapse Service', target: { kind: 'service', name: 'Razer Synapse Service' }, sizeBytes: 0, note: null },
+    ],
+  },
+];
+
+/** What a leftover scan might find for an app, for the browser preview. */
+function leftoversOf(app: AppRef): Leftover[] {
+  const name = app.name.replace(/\s*[\d.]+.*$/, '') || app.name;
+  const item = (kind: Leftover['kind'], target: Leftover['target'], label: string, reason: string, confidence: Leftover['confidence'], sizeBytes: number | null): Leftover =>
+    ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes, needsAdmin: !label.startsWith('C:\\Users') && !label.startsWith('HKCU'), target });
+  const path = (p: string, reason: string, confidence: Leftover['confidence'], mb: number, kind: Leftover['kind'] = 'folder') =>
+    item(kind, { kind: 'path', path: p }, p, reason, confidence, mb * MB);
+  const out = [
+    path(`C:\\Users\\you\\AppData\\Roaming\\${name}`, 'Named after the app', 'medium', 64),
+    path(`C:\\Users\\you\\AppData\\Local\\${name}`, 'Named after the app', 'medium', 212),
+    path(`C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\${name}.lnk`, "Shortcut to the app's folder", 'high', 0.002, 'shortcut'),
+    item('registry', { kind: 'registryKey', key: `HKCU\\Software\\${name}` }, `HKCU\\Software\\${name}`, 'Settings named after the app', 'medium', null),
+    item('task', { kind: 'task', path: `\\${name} Updater` }, `Task \\${name} Updater`, "Runs a program from the app's folder", 'high', null),
+    item('registry', { kind: 'registryKey', key: `HKCU\\Software\\${name} Labs` }, `HKCU\\Software\\${name} Labs`, "The publisher's settings – no other app from them is installed", 'low', null),
+  ];
+  if (app.installLocation) out.unshift(path(app.installLocation, "The app's folder, still there after uninstalling", 'high', 18));
+  return out.filter((l, i) => out.findIndex((o) => o.id === l.id) === i);
+}
+
+const sameTarget = (a: Removal['target'], b: Removal['target']) => JSON.stringify(a) === JSON.stringify(b);
+
+function remove(title: string, items: Removal[]): RemoveReport {
+  const gone = (t: Removal['target']) => items.some((i) => sameTarget(i.target, t));
+  startup = startup.filter((i) => !gone(i.removal));
+  services = services.filter((i) => !gone(i.removal));
+  tasks = tasks.filter((i) => !gone(i.removal));
+  const id = `${now()}-${batches.length}`;
+  if (settings.safety.quarantine) {
+    batches = [{ id, title, createdAt: now(), items: items.map((i) => ({ label: i.label, target: i.target, sizeBytes: i.sizeBytes ?? 0, note: null })) }, ...batches];
+  }
+  const freedBytes = items.reduce((s, i) => s + (i.sizeBytes ?? 0), 0);
+  return { batchId: settings.safety.quarantine ? id : null, removed: items.length, freedBytes, problems: [], notes: [] };
+}
+
+let uninstalling: { id: string; at: number } | null = null;
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// `?delay=3000` in the URL slows the scans down, to look at loading states.
+const extraDelay = Number(new URLSearchParams(window.location.search).get('delay')) || 0;
+
 export async function fixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  await delay(command === 'scan_cleanup' ? 900 : 250);
+  const atStart = command === 'environment' || command === 'get_settings';
+  const slow = command === 'scan_cleanup' || command === 'scan_leftovers' || command === 'create_restore_point' || command === 'clean_caches';
+  await delay(atStart ? 50 : (slow ? 1200 : 250) + extraDelay);
   const result = ((): unknown => {
     switch (command) {
       case 'environment': return environment;
       case 'list_apps': return apps;
-      case 'folder_size': return 734 * MB;
       case 'scan_cleanup': return cleanup;
       case 'list_startup': return startup;
       case 'list_services': return services;
@@ -133,6 +203,28 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
       case 'get_settings': return settings;
       case 'save_settings': settings = args?.settings as Settings; return settings;
       case 'storage_info': return storage();
+      case 'create_restore_point': return { created: true, message: 'Restore point created' };
+      case 'start_uninstall': uninstalling = { id: args?.id as string, at: Date.now() }; return null;
+      case 'uninstall_finished': {
+        const done = !!uninstalling && uninstalling.id === args?.id && Date.now() - uninstalling.at > 2500;
+        if (done) apps = apps.filter((a) => a.id !== args?.id);
+        return done;
+      }
+      case 'scan_leftovers': return leftoversOf(args?.app as AppRef);
+      case 'remove_items': return remove(args?.title as string, args?.items as Removal[]);
+      case 'list_quarantine': return batches;
+      case 'restore_batch': {
+        const batch = batches.find((b) => b.id === args?.id);
+        batches = batches.filter((b) => b.id !== args?.id);
+        return { restored: batch?.items.length ?? 0, problems: [], restartNeeded: !!batch?.items.some((i) => i.target.kind === 'service') };
+      }
+      case 'delete_batch': batches = batches.filter((b) => b.id !== args?.id); return null;
+      case 'clean_caches': {
+        const ids = args?.ids as string[];
+        const freedBytes = cleanup.filter((c) => ids.includes(c.id)).reduce((s, c) => s + c.sizeBytes, 0);
+        cleanup = cleanup.map((c) => (ids.includes(c.id) ? { ...c, sizeBytes: 0, fileCount: 0 } : c));
+        return { freedBytes: Math.round(freedBytes * 0.94), skippedFiles: 37 };
+      }
       default: throw new Error('Not available in the browser preview');
     }
   })();
