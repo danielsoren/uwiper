@@ -79,6 +79,6 @@ To regenerate the app icons after changing the logo: `npx tauri icon assets/logo
 ### Releasing
 
 1. Add a section for the version to `CHANGELOG.md` and bump the version in `package.json`, `backend/Cargo.toml` and `backend/tauri.conf.json`.
-2. Tag it: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Tag it: `git tag v0.2.0 && git push origin v0.2.0` – or run the **Build** workflow on `main` from the Actions tab with **release** ticked, and it tags the commit itself.
 
 CI builds on Windows and publishes a GitHub release with `UWiper.exe` and a portable zip, using the CHANGELOG section as the notes.
