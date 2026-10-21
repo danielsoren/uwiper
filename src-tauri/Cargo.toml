@@ -1,0 +1,42 @@
+[package]
+name = "uwiper"
+version = "0.1.0"
+description = "Ultimate Wiper – uninstall apps and clean up everything they leave behind"
+edition = "2021"
+publish = false
+
+[lib]
+# The `_lib` suffix keeps the library name distinct from the binary on Windows.
+name = "uwiper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "1"
+walkdir = "2"
+roxmltree = "0.21"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+window-vibrancy = "0.8"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
