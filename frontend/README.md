@@ -1,6 +1,6 @@
 # Frontend
 
-React 19 + TypeScript, styled with Tailwind CSS 4, state in zustand.
+React 19 + TypeScript, styled with Tailwind CSS 4, state in zustand. This folder is the Vite root (`index.html` lives here); the build goes to `../dist`, where `backend/tauri.conf.json` picks it up.
 
 ## Folders
 

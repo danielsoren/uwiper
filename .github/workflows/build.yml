@@ -1,5 +1,7 @@
 name: Build
 
+# Every push and pull request builds and tests on Windows.
+# Pushing a tag like v0.1.0 also publishes a GitHub release.
 on:
   push:
   pull_request:
@@ -33,7 +35,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: backend -> target
 
       - name: Install frontend dependencies
         run: npm ci
@@ -47,13 +49,13 @@ jobs:
       # Each Rust step keeps its output in a log so a failure can be shown
       # as annotations (readable through the API without downloading logs).
       - name: Clippy
-        working-directory: src-tauri
+        working-directory: backend
         run: |
           set -o pipefail
           cargo clippy --all-targets --message-format=short -- -D warnings 2>&1 | tee ../ci-clippy.log
 
       - name: Unit tests
-        working-directory: src-tauri
+        working-directory: backend
         run: |
           set -o pipefail
           cargo test 2>&1 | tee ../ci-test.log
@@ -73,15 +75,53 @@ jobs:
             while IFS= read -r line; do echo "::error title=$log::$line"; done <<< "$lines"
           done
 
-      - name: Package portable zip
+      - name: Package
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path portable/UWiper | Out-Null
-          Copy-Item src-tauri/target/release/uwiper.exe portable/UWiper/UWiper.exe
-          Compress-Archive -Path portable/UWiper -DestinationPath UWiper-portable.zip -Force
+          New-Item -ItemType Directory -Force -Path out/UWiper | Out-Null
+          Copy-Item backend/target/release/uwiper.exe out/UWiper/UWiper.exe
+          Compress-Archive -Path out/UWiper -DestinationPath out/UWiper-portable.zip -Force
 
       - uses: actions/upload-artifact@v4
         with:
-          name: UWiper-portable-${{ github.sha }}
-          path: UWiper-portable.zip
+          name: UWiper-${{ github.sha }}
+          path: |
+            out/UWiper-portable.zip
+            out/UWiper/UWiper.exe
           if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: windows
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: UWiper-${{ github.sha }}
+          path: out
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Release notes are the CHANGELOG.md section for this version.
+          version="${TAG#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[?" v "\\]?" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "UWiper $TAG" > notes.md
+
+          mv out/UWiper-portable.zip "out/UWiper-$TAG-portable.zip"
+          gh release create "$TAG" \
+            --title "UWiper $TAG" \
+            --notes-file notes.md \
+            "out/UWiper-$TAG-portable.zip" \
+            out/UWiper/UWiper.exe
