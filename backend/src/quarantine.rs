@@ -109,10 +109,24 @@ fn new_id(root: &Path, title: &str) -> String {
     id
 }
 
+/// Writes the manifest next to the old one first, so a crash or a full disk
+/// never leaves a half-written list behind.
 fn save(dir: &Path, batch: &Batch) -> Result<()> {
     let json = serde_json::to_string_pretty(batch).map_err(|e| Error::Other(e.to_string()))?;
-    std::fs::write(dir.join(MANIFEST), json)?;
+    let temp = dir.join(format!("{MANIFEST}.new"));
+    std::fs::write(&temp, json)?;
+    std::fs::rename(&temp, dir.join(MANIFEST))?;
     Ok(())
+}
+
+/// Services, tasks and startup entries go first, so an app's folder isn't
+/// still in use by its own service when it's moved; folders go last.
+fn removal_order(target: &Target) -> u8 {
+    match target {
+        Target::Service { .. } | Target::Task { .. } | Target::RegistryValue { .. } => 0,
+        Target::RegistryKey { .. } => 1,
+        Target::Path { .. } => 2,
+    }
 }
 
 fn load(dir: &Path) -> Option<Batch> {
@@ -153,6 +167,9 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
     let mut report = RemoveReport::default();
     let mut log = vec![format!("{title}:")];
 
+    let mut items = items;
+    items.sort_by_key(|item| removal_order(&item.target));
+    let mut unsaved = None;
     for (i, item) in items.into_iter().enumerate() {
         if let Err(reason) = check(&item.target) {
             log.push(format!("  skipped {} – {reason}", item.label));
@@ -188,7 +205,7 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
                 report.freed_bytes += item.size_bytes;
                 // Keep the manifest current, so a crash still leaves a batch that can be restored.
                 if keep {
-                    save(&dir, &batch)?;
+                    unsaved = save(&dir, &batch).err();
                 }
             }
             Err(e) => {
@@ -204,6 +221,12 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
         }
     }
 
+    if let Some(e) = unsaved {
+        report.notes.push(format!(
+            "The quarantine list couldn't be saved ({e}) – the files are in {}",
+            dir.display()
+        ));
+    }
     if keep && batch.items.is_empty() {
         let _ = std::fs::remove_dir_all(&dir);
     } else if keep {

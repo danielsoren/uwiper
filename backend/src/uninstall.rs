@@ -48,15 +48,25 @@ fn command(app: &apps::InstalledApp, quiet: bool) -> Result<(String, String)> {
         } else {
             format!("/x {code}")
         };
-        return Ok(("msiexec.exe".into(), args));
+        let msiexec = crate::util::system32("msiexec.exe").to_string_lossy().into_owned();
+        return Ok((msiexec, args));
     }
     let line = if quiet {
         app.quiet_uninstall_string.as_ref().or(app.uninstall_string.as_ref())
     } else {
         app.uninstall_string.as_ref().or(app.quiet_uninstall_string.as_ref())
     };
-    line.and_then(|l| crate::util::split_command(l))
-        .ok_or(Error::Other("This app doesn't say how to uninstall it".into()))
+    let (program, args) = line
+        .and_then(|l| crate::util::split_command(l))
+        .ok_or(Error::Other("This app doesn't say how to uninstall it".into()))?;
+    // A bare name like "rundll32.exe" is looked up in Windows' folders, never
+    // in UWiper's own folder, where something else could stand in for it.
+    let program = if program.contains(['\\', '/']) {
+        program
+    } else {
+        crate::util::resolve_executable(&program).ok_or(Error::Other(format!("Can't find {program}")))?
+    };
+    Ok((program, args))
 }
 
 #[cfg(not(windows))]
@@ -87,13 +97,14 @@ mod imp {
                 message: "Skipped – needs administrator rights".into(),
             };
         }
-        let description = format!("UWiper: before removing {app_name}").replace('\'', "''");
-        let script = format!(
-            "Checkpoint-Computer -Description '{description}' -RestorePointType APPLICATION_UNINSTALL \
-             -WarningAction Stop -ErrorAction Stop"
-        );
-        let args = ["-NoProfile", "-NonInteractive", "-Command", &script];
-        match crate::util::run_tool(r"WindowsPowerShell\v1.0\powershell.exe", &args) {
+        // The name travels in an environment variable, so nothing in it can
+        // be read as part of the script.
+        let description = format!("UWiper: before removing {app_name}");
+        let script = "Checkpoint-Computer -Description $env:UWIPER_RESTORE_POINT \
+                      -RestorePointType APPLICATION_UNINSTALL -WarningAction Stop -ErrorAction Stop";
+        let args = ["-NoProfile", "-NonInteractive", "-Command", script];
+        let env = [("UWIPER_RESTORE_POINT", description.as_str())];
+        match crate::util::run_tool_with_env(r"WindowsPowerShell\v1.0\powershell.exe", &args, &env) {
             Ok(_) => RestorePoint {
                 created: true,
                 message: "Restore point created".into(),

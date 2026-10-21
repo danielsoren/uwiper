@@ -97,6 +97,12 @@ pub fn windows_dir() -> String {
     std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string())
 }
 
+/// A program in System32, by full path, so nothing next to UWiper can stand in for it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn system32(name: &str) -> std::path::PathBuf {
+    Path::new(&windows_dir()).join("System32").join(name)
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let head = s.get(..prefix.len())?;
@@ -146,6 +152,29 @@ pub fn norm_path(path: &str) -> String {
     path.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
+/// The long form of a path that exists (`C:\PROGRA~1` → `C:\Program Files`),
+/// otherwise the path as given.
+pub fn long_path(path: &str) -> String {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+        let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        let len = unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        if len > 0 && len < buf.len() {
+            return String::from_utf16_lossy(&buf[..len]);
+        }
+    }
+    path.to_string()
+}
+
+/// `norm_path` of the long form: what two spellings of one folder share.
+pub fn canonical(path: &str) -> String {
+    norm_path(&long_path(path.trim()))
+}
+
 /// True when `path` is `root` or something inside it.
 pub fn is_within(path: &str, root: &str) -> bool {
     let (p, r) = (norm_path(path), norm_path(root));
@@ -177,12 +206,19 @@ pub fn utc_date(secs: u64) -> String {
 /// console window. A non-zero exit becomes an error carrying its message.
 #[cfg(windows)]
 pub fn run_tool(name: &str, args: &[&str]) -> crate::error::Result<String> {
+    run_tool_with_env(name, args, &[])
+}
+
+/// `run_tool` with extra environment variables, for passing text that must
+/// not be parsed as part of a command (PowerShell scripts, for one).
+#[cfg(windows)]
+pub fn run_tool_with_env(name: &str, args: &[&str], env: &[(&str, &str)]) -> crate::error::Result<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let program = Path::new(&windows_dir()).join("System32").join(name);
-    let output = std::process::Command::new(program)
+    let output = std::process::Command::new(system32(name))
         .args(args)
+        .envs(env.iter().copied())
         .creation_flags(CREATE_NO_WINDOW)
         .output()?;
     let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();

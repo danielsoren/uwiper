@@ -119,7 +119,9 @@ pub fn open_folder(path: String) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("explorer").arg(&path).spawn()?;
+        std::process::Command::new(std::path::Path::new(&crate::util::windows_dir()).join("explorer.exe"))
+            .arg(&path)
+            .spawn()?;
         Ok(())
     }
     #[cfg(not(windows))]
@@ -135,7 +137,7 @@ pub fn reveal_path(path: String) -> Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        std::process::Command::new("explorer")
+        std::process::Command::new(std::path::Path::new(&crate::util::windows_dir()).join("explorer.exe"))
             .raw_arg(format!("/select,\"{path}\""))
             .spawn()?;
         Ok(())

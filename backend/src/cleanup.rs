@@ -7,7 +7,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{blocking, Result};
-use crate::util::{dir_size, expand_env};
+use crate::targets::Guard;
+use crate::util::{canonical, dir_size, expand_env, is_within};
 use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
@@ -199,11 +200,16 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
     blocking(move || {
         let mut report = CleanReport::default();
         let mut lines = vec!["Cleaned caches:".to_string()];
+        // UWiper may run from inside %TEMP% (an opened zip) or keep its data there.
+        let own = Guard::new(&settings).own;
         for def in DEFS.iter().filter(|d| ids.iter().any(|id| id == d.id)) {
             let before = report.freed_bytes;
             for path in def.specs.iter().flat_map(resolve) {
+                if is_own(&path, &own) {
+                    continue;
+                }
                 if path.is_dir() {
-                    empty_dir(&path, &mut report);
+                    empty_dir(&path, &own, &mut report);
                 } else if let Ok(meta) = std::fs::metadata(&path) {
                     remove_file(&path, meta.len(), &mut report);
                 }
@@ -223,7 +229,13 @@ fn remove_file(path: &Path, len: u64, report: &mut CleanReport) {
     }
 }
 
-fn empty_dir(dir: &Path, report: &mut CleanReport) {
+/// True for UWiper's own folders and anything in them.
+fn is_own(path: &Path, own: &[String]) -> bool {
+    let p = canonical(&path.to_string_lossy());
+    own.iter().any(|dir| is_within(&p, dir))
+}
+
+fn empty_dir(dir: &Path, own: &[String], report: &mut CleanReport) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -233,11 +245,11 @@ fn empty_dir(dir: &Path, report: &mut CleanReport) {
             continue;
         };
         // Links and junctions may lead anywhere: leave them alone.
-        if meta.file_type().is_symlink() {
+        if meta.file_type().is_symlink() || is_own(&path, own) {
             continue;
         }
         if meta.is_dir() {
-            empty_dir(&path, report);
+            empty_dir(&path, own, report);
             // Succeeds only once it's empty.
             let _ = std::fs::remove_dir(&path);
         } else {
@@ -295,12 +307,21 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
         std::fs::write(dir.join("a.bin"), [0u8; 10]).unwrap();
         std::fs::write(dir.join("sub/deeper/b.bin"), [0u8; 5]).unwrap();
+        let keep = dir.join("UWiper");
+        std::fs::create_dir_all(&keep).unwrap();
+        std::fs::write(keep.join("settings.toml"), b"x").unwrap();
+        let own = vec![canonical(&keep.to_string_lossy())];
         let mut report = CleanReport::default();
-        empty_dir(&dir, &mut report);
+        empty_dir(&dir, &own, &mut report);
         assert_eq!(report.freed_bytes, 15);
         assert_eq!(report.skipped_files, 0);
         assert!(dir.is_dir());
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "only UWiper's own folder is left"
+        );
+        assert!(keep.join("settings.toml").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

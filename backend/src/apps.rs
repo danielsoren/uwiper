@@ -127,7 +127,7 @@ fn normalize(path: &str) -> String {
 
 /// Folders that hold many apps, or none in particular. An app that reports
 /// one of these as its location would be measured as everything inside it.
-fn shared_folders() -> Vec<String> {
+pub(crate) fn shared_folders() -> Vec<String> {
     let mut out: Vec<String> = [
         "ProgramFiles",
         "ProgramFiles(x86)",
@@ -152,7 +152,7 @@ fn shared_folders() -> Vec<String> {
 }
 
 /// True when `path` looks like the app's own folder and is fine to measure.
-fn is_own_folder(path: &str, shared: &[String]) -> bool {
+pub(crate) fn is_own_folder(path: &str, shared: &[String]) -> bool {
     const NOT_APP_FOLDERS: [&str; 5] = [
         r"\common files",
         r"\installshield installation information",
@@ -167,7 +167,7 @@ fn is_own_folder(path: &str, shared: &[String]) -> bool {
 
 /// Many installers (Inno Setup, NSIS) put the uninstaller in the app's folder
 /// but don't record the folder itself.
-fn location_from_uninstaller(uninstall: Option<&str>, shared: &[String]) -> Option<String> {
+pub(crate) fn location_from_uninstaller(uninstall: Option<&str>, shared: &[String]) -> Option<String> {
     let exe = PathBuf::from(command_executable(uninstall?)?);
     if !icons::is_uninstaller(&exe) {
         return None;

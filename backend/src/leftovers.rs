@@ -14,7 +14,7 @@ use tauri::State;
 use crate::error::{blocking, Result};
 use crate::settings::Settings;
 use crate::targets::{self, Guard, Target};
-use crate::util::{dir_size, expand_env, is_within, norm_path, parallel_map};
+use crate::util::{canonical, dir_size, expand_env, is_within, norm_path, parallel_map};
 use crate::{apps, AppState};
 
 /// The app as the UI knew it before uninstalling.
@@ -154,12 +154,16 @@ const GENERIC: [&str; 34] = [
 struct Names {
     /// Squashed forms of the app's name that a folder or key may carry.
     app: Vec<String>,
+    /// Forms another installed app's name starts with ("firefox" when
+    /// Firefox Developer Edition is installed too): a match is only a maybe.
+    contested: Vec<String>,
     /// The squashed publisher, when it's specific enough to match on.
     publisher: Option<String>,
 }
 
 impl Names {
-    fn new(app: &AppRef, taken: &HashSet<String>) -> Self {
+    /// `others` are the squashed clean names of the other installed apps.
+    fn new(app: &AppRef, others: &[String]) -> Self {
         let clean = clean_name(&app.name);
         let mut forms = vec![squash(&clean)];
         // "Mozilla Firefox" is often just "Firefox" on disk.
@@ -181,14 +185,31 @@ impl Names {
         forms.sort();
         forms.dedup();
         // Another installed app with the same name would share the folder.
-        forms.retain(|f| f.len() >= 3 && !GENERIC.contains(&f.as_str()) && !taken.contains(f));
+        forms.retain(|f| f.len() >= 3 && !GENERIC.contains(&f.as_str()) && !others.contains(f));
+        let contested = forms
+            .iter()
+            .filter(|f| others.iter().any(|o| o.starts_with(f.as_str())))
+            .cloned()
+            .collect();
         let publisher = (publisher.len() >= 3 && !GENERIC.contains(&publisher.as_str())).then_some(publisher);
-        Names { app: forms, publisher }
+        Names {
+            app: forms,
+            contested,
+            publisher,
+        }
     }
 
+    /// How sure a match on this name is: `sure` for the app's own name, low
+    /// for a name another app starts with too, `None` for no match.
+    fn level(&self, name: &str, sure: &'static str) -> Option<&'static str> {
+        let candidates = [squash(name), squash(&clean_name(name))];
+        let form = candidates.iter().find(|c| self.app.contains(c))?;
+        Some(if self.contested.contains(form) { "low" } else { sure })
+    }
+
+    #[cfg(test)]
     fn is_app(&self, name: &str) -> bool {
-        let s = squash(name);
-        self.app.contains(&s) || self.app.contains(&squash(&clean_name(name)))
+        self.level(name, "high").is_some()
     }
 
     fn is_publisher(&self, name: &str) -> bool {
@@ -201,6 +222,9 @@ impl Names {
 
 struct Found {
     guard: Guard,
+    /// The app still looks installed (the uninstaller may have been cancelled):
+    /// every find is one level less sure.
+    downgrade: bool,
     /// Other installed apps' folders: never removed, nor anything holding them.
     other_folders: Vec<String>,
     items: Vec<Leftover>,
@@ -209,13 +233,19 @@ struct Found {
 
 impl Found {
     fn add(&mut self, kind: &'static str, target: Target, reason: &str, confidence: &'static str) {
+        let confidence = match (self.downgrade, confidence) {
+            (true, "high") => "medium",
+            (true, _) => "low",
+            (false, c) => c,
+        };
         let label = targets::describe(&target);
         let id = norm_path(&label);
         if self.seen.contains(&id) || self.guard.check(&target).is_err() {
             return;
         }
         if let Target::Path { path } = &target {
-            if self.other_folders.iter().any(|other| is_within(other, path)) {
+            let path = canonical(path);
+            if self.other_folders.iter().any(|other| is_within(other, &path)) {
                 return;
             }
         }
@@ -308,6 +338,11 @@ pub fn shortcut_points_into(bytes: &[u8], folder: &str) -> bool {
     if needle.len() < 4 {
         return false;
     }
+    // The folder itself or something in it, not "…\App Insiders".
+    let mentions = |text: String| {
+        text.match_indices(&needle)
+            .any(|(at, _)| matches!(text[at + needle.len()..].chars().next(), None | Some('\\' | '"' | '\0')))
+    };
     let utf16 = |skip: usize| {
         let units: Vec<u16> = bytes[skip..]
             .chunks_exact(2)
@@ -315,9 +350,9 @@ pub fn shortcut_points_into(bytes: &[u8], folder: &str) -> bool {
             .collect();
         String::from_utf16_lossy(&units).to_lowercase()
     };
-    String::from_utf8_lossy(bytes).to_lowercase().contains(&needle)
-        || utf16(0).contains(&needle)
-        || (bytes.len() > 1 && utf16(1).contains(&needle))
+    mentions(String::from_utf8_lossy(bytes).to_lowercase())
+        || mentions(utf16(0))
+        || (bytes.len() > 1 && mentions(utf16(1)))
 }
 
 /// Folders where apps keep their data, with how sure a name match there is.
@@ -364,28 +399,51 @@ fn shortcut_dirs() -> Vec<(PathBuf, usize)> {
 
 pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     let others: Vec<apps::InstalledApp> = apps::list_plain()?.into_iter().filter(|a| a.id != app.id).collect();
-    let taken: HashSet<String> = others.iter().map(|a| squash(&clean_name(&a.name))).collect();
+    let other_names: Vec<String> = others.iter().map(|a| squash(&clean_name(&a.name))).collect();
     let publisher_shared = app.publisher.as_deref().map(clean_publisher).is_some_and(|p| {
         others
             .iter()
             .any(|o| o.publisher.as_deref().map(clean_publisher).as_deref() == Some(p.as_str()))
     });
-    let names = Names::new(app, &taken);
+    let names = Names::new(app, &other_names);
+    let guard = Guard::new(settings);
+
+    // Other apps' folders, also the ones only their uninstaller reveals.
+    let shared = apps::shared_folders();
+    let other_folders: Vec<String> = others
+        .iter()
+        .filter_map(|o| {
+            o.install_location
+                .clone()
+                .or_else(|| apps::location_from_uninstaller(o.uninstall_string.as_deref(), &shared))
+        })
+        .map(|p| canonical(&p))
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    // The reported folder only counts when it's the app's own: not a drive,
+    // a shared or system folder, nor one that holds another app.
     let install = app
         .install_location
         .as_deref()
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| p.trim_end_matches('\\').to_string());
-    let inside_install = |path: &str| install.as_deref().is_some_and(|dir| is_within(path, dir));
+        .map(|p| p.trim().trim_end_matches('\\').to_string())
+        .filter(|p| {
+            !p.is_empty()
+                && guard.check(&Target::Path { path: p.clone() }).is_ok()
+                && apps::is_own_folder(p, &shared)
+                && !other_folders.iter().any(|o| is_within(o, p))
+        });
+    let install_canon = install.as_deref().map(canonical);
+    let inside_install = |path: &str| {
+        install_canon
+            .as_deref()
+            .is_some_and(|dir| is_within(&canonical(path), dir))
+    };
 
     let mut found = Found {
-        guard: Guard::new(settings),
-        other_folders: others
-            .iter()
-            .filter_map(|o| o.install_location.as_deref())
-            .map(norm_path)
-            .collect(),
+        downgrade: imp::key_exists(&app.id),
+        guard,
+        other_folders,
         items: Vec::new(),
         seen: HashSet::new(),
     };
@@ -404,11 +462,15 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
         for (root, confidence) in data_roots(deep) {
             for dir in subdirs(&root) {
                 let name = file_name(&dir);
-                if names.is_app(&name) {
-                    found.add_path(&dir, "Named after the app", confidence);
+                if let Some(level) = names.level(&name, confidence) {
+                    found.add_path(&dir, "Named after the app", level);
                 } else if !quick && names.is_publisher(&name) {
-                    for sub in subdirs(&dir).iter().filter(|d| names.is_app(&file_name(d))) {
-                        found.add_path(sub, "Named after the app, in its publisher's folder", confidence);
+                    // Other apps from the same publisher may share these.
+                    let sure = if publisher_shared { "low" } else { confidence };
+                    for sub in subdirs(&dir) {
+                        if let Some(level) = names.level(&file_name(&sub), sure) {
+                            found.add_path(&sub, "Named after the app, in its publisher's folder", level);
+                        }
                     }
                     if deep && !publisher_shared {
                         found.add_path(
@@ -434,8 +496,10 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
                 let name = file_name(path);
                 let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s).to_string();
                 if entry.file_type().is_dir() {
-                    if names.is_app(&name) || (!publisher_shared && names.is_publisher(&name)) {
-                        found.add_path(path, "Start menu folder for the app", "medium");
+                    if let Some(level) = names.level(&name, "medium") {
+                        found.add_path(path, "Start menu folder for the app", level);
+                    } else if !publisher_shared && names.is_publisher(&name) {
+                        found.add_path(path, "Start menu folder of the app's publisher", "medium");
                     }
                     continue;
                 }
@@ -450,8 +514,8 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
                 });
                 if points_in {
                     found.add_path(path, "Shortcut to the app's folder", "high");
-                } else if names.is_app(&stem) {
-                    found.add_path(path, "Shortcut named after the app", "medium");
+                } else if let Some(level) = names.level(&stem, "medium") {
+                    found.add_path(path, "Shortcut named after the app", level);
                 }
             }
         }
@@ -460,7 +524,8 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     // Startup entries are files or registry values, so they follow either switch.
     if look.files || look.registry {
         for item in crate::startup::list().unwrap_or_default() {
-            if item.target.as_deref().is_some_and(inside_install) {
+            let program = item.target.as_deref().unwrap_or_default();
+            if !item.is_windows && inside_install(program) && !found.guard.is_excluded(program) {
                 found.add("startup", item.removal, "Starts the removed app with Windows", "high");
             }
         }
@@ -478,22 +543,25 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
         for software in [r"HKCU\Software", r"HKLM\SOFTWARE", r"HKLM\SOFTWARE\WOW6432Node"] {
             for name in imp::subkeys(software) {
                 let key = format!(r"{software}\{name}");
-                if names.is_app(&name) {
+                if let Some(level) = names.level(&name, "medium") {
                     found.add(
                         "registry",
                         Target::RegistryKey { key },
                         "Settings named after the app",
-                        "medium",
+                        level,
                     );
                 } else if !quick && names.is_publisher(&name) {
-                    for sub in imp::subkeys(&key).into_iter().filter(|s| names.is_app(s)) {
-                        let key = format!(r"{key}\{sub}");
-                        found.add(
-                            "registry",
-                            Target::RegistryKey { key },
-                            "The app's settings under its publisher",
-                            "medium",
-                        );
+                    let sure = if publisher_shared { "low" } else { "medium" };
+                    for sub in imp::subkeys(&key) {
+                        if let Some(level) = names.level(&sub, sure) {
+                            let key = format!(r"{key}\{sub}");
+                            found.add(
+                                "registry",
+                                Target::RegistryKey { key },
+                                "The app's settings under its publisher",
+                                level,
+                            );
+                        }
                     }
                     if deep && !publisher_shared {
                         let reason = "The publisher's settings – no other app from them is installed";
@@ -506,7 +574,8 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
 
     if look.services {
         for service in crate::services::list().unwrap_or_default() {
-            if service.binary.as_deref().is_some_and(inside_install) && !service.is_windows {
+            let program = service.binary.as_deref().unwrap_or_default();
+            if !service.is_windows && inside_install(program) && !found.guard.is_excluded(program) {
                 let reason = format!(
                     "Service \"{}\" runs a program from the app's folder",
                     service.display_name
@@ -518,12 +587,14 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
 
     if look.tasks {
         for task in crate::tasks::list().unwrap_or_default() {
-            let last = task.name.rsplit('\\').next().unwrap_or_default().to_string();
-            if task.binary.as_deref().is_some_and(inside_install) {
+            let program = task.binary.as_deref().unwrap_or_default();
+            if task.is_windows || (!program.is_empty() && found.guard.is_excluded(program)) {
+                continue;
+            }
+            if inside_install(program) {
                 found.add("task", task.removal, "Runs a program from the app's folder", "high");
-            } else if !task.is_windows && (names.is_app(&last) || task.name.split('\\').any(|part| names.is_app(part)))
-            {
-                found.add("task", task.removal, "Named after the app", "medium");
+            } else if let Some(level) = task.name.split('\\').find_map(|part| names.level(part, "medium")) {
+                found.add("task", task.removal, "Named after the app", level);
             }
         }
     }
@@ -604,28 +675,34 @@ mod tests {
     fn matches_folders_named_after_the_app() {
         let names = Names::new(
             &app("OBS Studio", "OBS Project", Some(r"C:\Program Files\obs-studio")),
-            &HashSet::new(),
+            &[],
         );
         assert!(names.is_app("obs-studio"));
         assert!(names.is_app("OBS Studio"));
         assert!(!names.is_app("obs"));
         assert!(names.is_publisher("OBS Project"));
 
-        let firefox = Names::new(&app("Mozilla Firefox (x64 en-US)", "Mozilla", None), &HashSet::new());
-        assert!(firefox.is_app("Firefox"));
+        let firefox = Names::new(&app("Mozilla Firefox (x64 en-US)", "Mozilla", None), &[]);
+        assert_eq!(firefox.level("Firefox", "medium"), Some("medium"));
         assert!(firefox.is_app("Mozilla Firefox"));
         assert!(!firefox.is_app("Mozilla"));
     }
 
     #[test]
+    fn names_other_apps_start_with_are_only_a_maybe() {
+        let others = vec![squash("Firefox Developer Edition")];
+        let firefox = Names::new(&app("Mozilla Firefox", "Mozilla", None), &others);
+        assert_eq!(firefox.level("Firefox", "medium"), Some("low"));
+    }
+
+    #[test]
     fn never_matches_generic_or_shared_names() {
-        let taken: HashSet<String> = ["python".to_string()].into();
         let python = Names::new(
             &app("Python 3.12.4 (64-bit)", "Python Software Foundation", None),
-            &taken,
+            &["python".to_string()],
         );
         assert!(!python.is_app("Python"), "another Python is installed");
-        let updater = Names::new(&app("Updater", "Microsoft Corporation", None), &HashSet::new());
+        let updater = Names::new(&app("Updater", "Microsoft Corporation", None), &[]);
         assert!(!updater.is_app("Updater"));
         assert!(!updater.is_publisher("Microsoft"));
     }
@@ -635,6 +712,12 @@ mod tests {
         let mut lnk = b"L\0\0\0junk C:\\Program Files\\Ravenswatch\\Ravenswatch.exe junk".to_vec();
         assert!(shortcut_points_into(&lnk, r"C:\Program Files\Ravenswatch"));
         assert!(!shortcut_points_into(&lnk, r"C:\Program Files\Other"));
+        assert!(
+            !shortcut_points_into(&lnk, r"C:\Program Files\Ravens"),
+            "only whole folder names"
+        );
+        let insiders = b"x C:\\Program Files\\Microsoft VS Code Insiders\\Code - Insiders.exe".to_vec();
+        assert!(!shortcut_points_into(&insiders, r"C:\Program Files\Microsoft VS Code"));
         lnk = r"x C:\Games\Ravenswatch\Game.exe"
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::util::{expand_env, is_within, norm_path, windows_dir};
+use crate::util::{canonical, expand_env, is_within, norm_path, windows_dir};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -50,8 +50,25 @@ pub struct Guard {
     pub start_menus: Vec<String>,
     /// Windows and Microsoft components stay off limits.
     pub protect_system: bool,
-    /// The user's "Never touch" list: folders and registry keys.
+    /// The user's "Never touch" list: folders (canonical) and registry keys (`norm_key`).
     pub exclusions: Vec<String>,
+}
+
+/// A registry key in one spelling: `HKCU`/`HKLM`, no "Computer\" prefix,
+/// no WOW6432Node, lowercase. Only for comparing keys.
+pub fn norm_key(key: &str) -> String {
+    let k = norm_path(key);
+    let k = k.strip_prefix(r"computer\").unwrap_or(&k);
+    let k = k
+        .replacen("hkey_current_user", "hkcu", 1)
+        .replacen("hkey_local_machine", "hklm", 1);
+    k.replacen(r"\software\wow6432node", r"\software", 1)
+}
+
+fn looks_like_key(entry: &str) -> bool {
+    let e = entry.trim().to_ascii_uppercase();
+    let e = e.strip_prefix("COMPUTER\\").unwrap_or(&e);
+    e.starts_with("HK")
 }
 
 impl Guard {
@@ -60,7 +77,8 @@ impl Guard {
         for key in crate::paths::DATA_DIRS {
             own.push(crate::paths::data_dir(settings, key).to_string_lossy().into_owned());
         }
-        let clean = |list: Vec<String>| list.iter().map(|p| norm_path(p)).filter(|p| !p.is_empty()).collect();
+        // Long forms, since %TEMP% and friends often hold 8.3 names.
+        let clean = |list: Vec<String>| list.iter().map(|p| canonical(p)).filter(|p| !p.is_empty()).collect();
         Guard {
             protected: clean(protected_folders()),
             own: clean(own),
@@ -70,9 +88,29 @@ impl Guard {
                 .scan
                 .exclusions
                 .iter()
-                .map(|e| norm_path(&expand_env(e)))
+                .map(|e| {
+                    if looks_like_key(e) {
+                        norm_key(e)
+                    } else {
+                        canonical(&expand_env(e))
+                    }
+                })
+                .filter(|e| !e.is_empty())
                 .collect(),
         }
+    }
+
+    /// True when a path or key is on the "Never touch" list, or holds something that is.
+    pub fn is_excluded(&self, path_or_key: &str) -> bool {
+        let item = if looks_like_key(path_or_key) {
+            norm_key(path_or_key)
+        } else {
+            canonical(path_or_key)
+        };
+        // Removing a parent of an excluded item would remove the item too.
+        self.exclusions
+            .iter()
+            .any(|e| is_within(&item, e) || is_within(e, &item))
     }
 
     /// `Err` with the reason when the target must not be touched.
@@ -85,7 +123,7 @@ impl Guard {
                 if name.is_empty() {
                     return Err("The default value is left alone".into());
                 }
-                self.check_excluded(key)
+                self.check_excluded(&format!(r"{key}\{name}"))
             }
             Target::Service { name } => {
                 if name.is_empty() || name.contains('\\') {
@@ -105,21 +143,33 @@ impl Guard {
         }
     }
 
-    fn check_excluded(&self, path: &str) -> std::result::Result<(), String> {
-        // Removing a parent of an excluded item would remove the item too.
-        if self.exclusions.iter().any(|e| is_within(path, e) || is_within(e, path)) {
+    fn check_excluded(&self, path_or_key: &str) -> std::result::Result<(), String> {
+        if self.is_excluded(path_or_key) {
             return Err("On your \"Never touch\" list".into());
         }
         Ok(())
     }
 
     fn check_path(&self, path: &str) -> std::result::Result<(), String> {
-        let p = norm_path(path);
-        let below_root = p.len() > 3 && p.as_bytes().get(1) == Some(&b':') && p.as_bytes().get(2) == Some(&b'\\');
+        if path.trim() != path {
+            return Err("An unusual path spelling".into());
+        }
+        let raw = path.replace('/', "\\");
+        let below_root = raw.len() > 3 && raw.as_bytes()[1] == b':' && raw.as_bytes()[2] == b'\\';
         if !below_root {
             return Err("Drive roots and relative paths are never removed".into());
         }
-        if is_within(&p, &windows_dir()) {
+        // Windows quietly drops "." and "..", doubled separators and trailing
+        // dots or spaces, so such a spelling could point somewhere else.
+        let odd = raw[3..]
+            .trim_end_matches('\\')
+            .split('\\')
+            .any(|part| part.is_empty() || part == "." || part == ".." || part.ends_with('.') || part.ends_with(' '));
+        if odd {
+            return Err("An unusual path spelling".into());
+        }
+        let p = canonical(&raw);
+        if is_within(&p, &canonical(&windows_dir())) {
             return Err("Part of Windows".into());
         }
         if self.protected.iter().any(|root| is_within(root, &p)) {
@@ -174,8 +224,9 @@ impl Guard {
         let uninstall = r"microsoft\windows\currentversion\uninstall";
         let joined = rest.join("\\");
         let is_uninstall_entry = joined.starts_with(&format!("{uninstall}\\")) && rest.len() == 5;
+        // Microsoft's keys are never removed, whatever the settings say.
         let system_vendor = vendor == "microsoft" || vendor == "windows";
-        if system_vendor && !is_uninstall_entry && (rest.len() == 1 || self.protect_system) {
+        if system_vendor && !is_uninstall_entry {
             return Err("Windows or Microsoft component".into());
         }
         self.check_excluded(key)
@@ -297,9 +348,10 @@ pub fn move_path(from: &Path, to: &Path) -> Result<bool> {
     Ok(remove_path(from).is_ok())
 }
 
-/// Moves what's in `from` into the existing folder `to`, keeping anything
-/// that is already there.
-fn merge_into(from: &Path, to: &Path) -> Result<()> {
+/// Moves what's in `from` into the existing folder `to`. Files already there
+/// win; returns how many were in the way, and their copies stay in `from`.
+fn merge_into(from: &Path, to: &Path) -> Result<usize> {
+    let mut conflicts = 0;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let dest = to.join(entry.file_name());
@@ -307,16 +359,22 @@ fn merge_into(from: &Path, to: &Path) -> Result<()> {
             Err(_) => {
                 move_path(&entry.path(), &dest)?;
             }
-            Ok(meta) if meta.is_dir() && entry.path().is_dir() => merge_into(&entry.path(), &dest)?,
-            Ok(_) => {}
+            Ok(meta) if meta.is_dir() && entry.path().is_dir() => conflicts += merge_into(&entry.path(), &dest)?,
+            Ok(_) => conflicts += 1,
         }
     }
-    let _ = remove_path(from);
-    Ok(())
+    // Only an emptied folder goes away.
+    let _ = std::fs::remove_dir(from);
+    Ok(conflicts)
 }
 
 fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "It holds a link or junction, so it can only be moved within its own drive",
+        ));
+    }
     if meta.is_dir() {
         std::fs::create_dir_all(to)?;
         for entry in std::fs::read_dir(from)? {
@@ -377,7 +435,7 @@ pub fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>
             let note = (!complete).then(|| "Some files were in use and stayed behind".to_string());
             Ok((Backup::Moved { file: name }, note))
         }
-        _ => imp::quarantine(target, dir).map(|backup| (backup, None)),
+        _ => imp::quarantine(target, dir),
     }
 }
 
@@ -400,7 +458,13 @@ pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
             match std::fs::symlink_metadata(&original) {
                 Err(_) => move_path(&stored, &original).map(|_| ()),
                 // Partly removed, or the app was installed again: fill in what's missing.
-                Ok(meta) if meta.is_dir() && stored.is_dir() => merge_into(&stored, &original),
+                Ok(meta) if meta.is_dir() && stored.is_dir() => match merge_into(&stored, &original)? {
+                    0 => Ok(()),
+                    n => Err(Error::Other(format!(
+                        "{n} files already exist at the original location – the rest is back, \
+                         and the quarantined copies of those are kept"
+                    ))),
+                },
                 Ok(_) => Err(Error::Other("Something new is already at the original location".into())),
             }
         }
@@ -412,7 +476,7 @@ pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
 mod imp {
     use super::*;
 
-    pub fn quarantine(_target: &Target, _dir: &Path) -> Result<Backup> {
+    pub fn quarantine(_target: &Target, _dir: &Path) -> Result<(Backup, Option<String>)> {
         Err(Error::Unsupported)
     }
 
@@ -464,13 +528,17 @@ mod imp {
         PathBuf::from(format!(r"{}\System32\Tasks{}", windows_dir(), path))
     }
 
-    pub fn quarantine(target: &Target, dir: &Path) -> Result<Backup> {
+    pub fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>)> {
         match target {
             Target::RegistryKey { key } => {
                 let file = "key.reg";
                 export(key, &dir.join(file))?;
-                delete(target)?;
-                Ok(Backup::Reg { file: file.into() })
+                // Deleting a tree can stop half-way at a protected subkey, so
+                // once exported, the backup is kept whatever happens.
+                let note = delete(target)
+                    .err()
+                    .map(|e| format!("Only partly removed ({e}) – its backup is kept"));
+                Ok((Backup::Reg { file: file.into() }, note))
             }
             Target::RegistryValue { key, name } => {
                 let (h, sub) = split_key(key).ok_or(Error::Other("Not a registry key".into()))?;
@@ -479,22 +547,25 @@ mod imp {
                     .map_err(registry_error)?;
                 let value = reg.get_raw_value(name).map_err(registry_error)?;
                 reg.delete_value(name).map_err(registry_error)?;
-                Ok(Backup::Value {
-                    vtype: value.vtype as u32,
-                    data: value.bytes.into_owned(),
-                })
+                Ok((
+                    Backup::Value {
+                        vtype: value.vtype as u32,
+                        data: value.bytes.into_owned(),
+                    },
+                    None,
+                ))
             }
             Target::Service { name } => {
                 let file = "service.reg";
                 export(&service_key(name), &dir.join(file))?;
                 delete(target)?;
-                Ok(Backup::Reg { file: file.into() })
+                Ok((Backup::Reg { file: file.into() }, None))
             }
             Target::Task { path } => {
                 let file = "task.xml";
                 std::fs::copy(task_file(path), dir.join(file)).map_err(friendly_io)?;
                 delete(target)?;
-                Ok(Backup::TaskXml { file: file.into() })
+                Ok((Backup::TaskXml { file: file.into() }, None))
             }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
         }
@@ -514,8 +585,17 @@ mod imp {
                 reg.delete_value(name).map_err(registry_error)
             }
             Target::Service { name } => {
-                // A running service would linger until the next restart.
-                let _ = run_tool("sc.exe", &["stop", name]);
+                // Deleting a running service only marks it, and restoring it
+                // before a restart would keep that mark. Stop it first.
+                if run_tool("sc.exe", &["stop", name]).is_ok() {
+                    for _ in 0..20 {
+                        let state = run_tool("sc.exe", &["query", name]).unwrap_or_default();
+                        if state.is_empty() || state.contains("STOPPED") {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
+                }
                 run_tool("sc.exe", &["delete", name]).map(|_| ())
             }
             Target::Task { path } => run_tool("schtasks.exe", &["/Delete", "/TN", path, "/F"]).map(|_| ()),
@@ -580,7 +660,7 @@ mod tests {
                 r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Start Menu\Programs",
             )],
             protect_system: true,
-            exclusions: vec![norm_path(r"D:\Games"), norm_path(r"HKCU\Software\Keep")],
+            exclusions: vec![norm_path(r"D:\Games"), norm_key(r"HKCU\Software\Keep")],
         }
     }
 
@@ -613,12 +693,40 @@ mod tests {
     }
 
     #[test]
+    fn rejects_paths_windows_would_rewrite() {
+        let g = guard();
+        for p in [
+            r"C:\Program Files.",
+            r"C:\Program Files\.",
+            r"C:\Program Files\x\..",
+            r"C:\\Program Files",
+            r"C:\Program Files\App ",
+            r"C:\Users\me\Documents.",
+        ] {
+            assert!(g.check(&path(p)).is_err(), "{p}");
+        }
+        assert!(
+            g.check(&path(r"C:\Program Files\App\")).is_ok(),
+            "a trailing separator is fine"
+        );
+    }
+
+    #[test]
     fn respects_the_never_touch_list() {
         let g = guard();
         assert!(g.check(&path(r"D:\Games\Old")).is_err());
         assert!(g.check(&path(r"D:\Games")).is_err());
         assert!(g.check(&path(r"D:\")).is_err());
         assert!(g.check(&key(r"HKCU\Software\Keep\Sub")).is_err());
+        assert!(g.is_excluded(r"Computer\HKEY_CURRENT_USER\Software\Keep"));
+        let g = Guard {
+            exclusions: vec![norm_key(r"HKLM\SOFTWARE\Vendor")],
+            ..guard()
+        };
+        assert!(
+            g.check(&key(r"HKLM\SOFTWARE\WOW6432Node\Vendor\App")).is_err(),
+            "the 32-bit twin too"
+        );
     }
 
     #[test]
@@ -663,6 +771,15 @@ mod tests {
         assert_eq!(std::fs::read(original.join("sub/a.txt")).unwrap(), b"hello");
         assert_eq!(std::fs::read(original.join("new.txt")).unwrap(), b"new");
         assert!(restore(&target, &backup, &batch).is_err(), "nothing left to restore");
+
+        // A file that came back meanwhile wins, and the quarantined copy is kept.
+        let (backup, _) = quarantine(&target, &batch).unwrap();
+        std::fs::create_dir_all(original.join("sub")).unwrap();
+        std::fs::write(original.join("sub/a.txt"), b"newer").unwrap();
+        assert!(restore(&target, &backup, &batch).is_err());
+        assert_eq!(std::fs::read(original.join("sub/a.txt")).unwrap(), b"newer");
+        assert_eq!(std::fs::read(original.join("new.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(batch.join("App/sub/a.txt")).unwrap(), b"hello");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
