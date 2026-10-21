@@ -1,11 +1,17 @@
 name: Build
 
 # Every push and pull request builds and tests on Windows.
-# Pushing a tag like v0.1.0 also publishes a GitHub release.
+# A release is published by pushing a tag like v0.1.0, or by running this
+# workflow by hand with "release" ticked (it tags the commit itself).
 on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: Publish a release for the version in package.json
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -93,7 +99,7 @@ jobs:
   release:
     name: Publish release
     needs: windows
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -108,8 +114,17 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(node -p "require('./package.json').version")"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists – bump the version first"
+            exit 1
+          fi
+
           # Release notes are the CHANGELOG.md section for this version.
           version="${TAG#v}"
           awk -v v="$version" '
@@ -121,6 +136,7 @@ jobs:
 
           mv out/UWiper-portable.zip "out/UWiper-$TAG-portable.zip"
           gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
             --title "UWiper $TAG" \
             --notes-file notes.md \
             "out/UWiper-$TAG-portable.zip" \
