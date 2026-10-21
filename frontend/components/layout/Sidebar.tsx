@@ -65,6 +65,7 @@ export function Sidebar() {
   const startup = useAppStore((s) => s.res.startup.data);
   const services = useAppStore((s) => s.res.services.data);
   const tasks = useAppStore((s) => s.res.tasks.data);
+  const batches = useAppStore((s) => s.res.quarantine.data);
   const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
 
   const broken = brokenEntries(startup, services, tasks);
@@ -78,7 +79,7 @@ export function Sidebar() {
   ];
   const manage: NavItem[] = [
     { page: 'system', label: 'System', icon: 'cpu' },
-    { page: 'quarantine', label: 'Quarantine', icon: 'archive' },
+    { page: 'quarantine', label: 'Quarantine', icon: 'archive', badge: batches?.length ? String(batches.length) : undefined },
   ];
 
   return (
@@ -106,7 +107,7 @@ export function Sidebar() {
 
       {!inTauri && <StatusCard tone="warn" icon="info" title="Browser preview" text="Sample data – run the app for real results" />}
       {inTauri && env?.elevated && (
-        <StatusCard tone="good" icon="shield" title="Administrator" text="Read-only in this version – nothing is changed" />
+        <StatusCard tone="good" icon="shield" title="Administrator" text="Full access – leftovers anywhere can be removed" />
       )}
       {inTauri && env && !env.elevated && (
         <StatusCard tone="warn" icon="lock" title="Limited mode" text="Some areas need administrator rights">

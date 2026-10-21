@@ -346,9 +346,12 @@ pub fn remove_path(path: &Path) -> std::io::Result<()> {
 }
 
 fn friendly_io(e: std::io::Error) -> Error {
+    let in_use = || Error::Other("In use – close the app that uses it and try again".into());
     match e.raw_os_error() {
+        // With admin rights, "access denied" means something holds the file open.
+        Some(5) if crate::system::is_elevated() => in_use(),
         Some(5) => Error::NeedsAdmin,
-        Some(32) | Some(33) => Error::Other("In use – close the app that uses it and try again".into()),
+        Some(32) | Some(33) => in_use(),
         _ => Error::Io(e),
     }
 }
@@ -510,7 +513,11 @@ mod imp {
                     .map_err(registry_error)?;
                 reg.delete_value(name).map_err(registry_error)
             }
-            Target::Service { name } => run_tool("sc.exe", &["delete", name]).map(|_| ()),
+            Target::Service { name } => {
+                // A running service would linger until the next restart.
+                let _ = run_tool("sc.exe", &["stop", name]);
+                run_tool("sc.exe", &["delete", name]).map(|_| ())
+            }
             Target::Task { path } => run_tool("schtasks.exe", &["/Delete", "/TN", path, "/F"]).map(|_| ()),
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
         }

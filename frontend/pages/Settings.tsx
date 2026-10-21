@@ -124,7 +124,7 @@ export function Settings() {
           <SettingsRow label={'"Installed apps" entry'} sub="Not needed for a portable app – delete the folder to remove it" control={<Pill>Not created</Pill>} />
         </SettingsSection>
 
-        <SettingsSection title="Safety" note="Used by uninstall and cleanup, which arrive in v0.2.">
+        <SettingsSection title="Safety" note="Used when you uninstall apps, remove leftovers and clean caches.">
           <SettingsRow
             label="Quarantine"
             sub={safety.quarantine ? 'Keep everything UWiper removes so it can be put back' : 'Off – removed items are deleted for good right away'}
@@ -169,7 +169,7 @@ export function Settings() {
           />
         </SettingsSection>
 
-        <SettingsSection title="Leftover scan" note="Used by the leftover scan, which arrives in v0.2.">
+        <SettingsSection title="Leftover scan" note="Runs after an app's own uninstaller has finished.">
           <SettingsRow
             label="Scan depth"
             sub="Deep also checks shared vendor folders and the whole registry"
@@ -186,7 +186,7 @@ export function Settings() {
               />
             }
           />
-          <SettingsRow label="Look in" sub="Places UWiper checks after an app is removed">
+          <SettingsRow label="Look in" sub="Places UWiper checks after an app is removed. Drivers, firewall rules and PATH arrive in v0.3">
             <div className="flex flex-wrap gap-1.5">
               {LOOK_IN.map(([key, label]) => (
                 <Chip key={key} on={scan.lookIn[key]} onToggle={() => set('scan', { lookIn: { ...scan.lookIn, [key]: !scan.lookIn[key] } })}>

@@ -4,8 +4,9 @@ import { cn } from '../../lib/cn';
 import { formatBytes, formatDate } from '../../lib/format';
 import type { InstalledApp } from '../../lib/types';
 import { useAppStore } from '../../store/useAppStore';
-import { Button, Note } from '../../ui';
+import { Button } from '../../ui';
 import { AppTile } from './AppTile';
+import { UninstallDialog } from './UninstallDialog';
 
 function Fact({ label, hint, children, wide, mono }: { label: string; hint?: string | null; children: ReactNode; wide?: boolean; mono?: boolean }) {
   return (
@@ -29,6 +30,7 @@ export function AppDetail({ app }: { app: InstalledApp }) {
   const attempt = useAppStore((s) => s.attempt);
   const notify = useAppStore((s) => s.notify);
   const [copied, setCopied] = useState(false);
+  const [uninstalling, setUninstalling] = useState(false);
   const command = app.quietUninstallString ?? app.uninstallString;
 
   const copy = () => {
@@ -79,7 +81,7 @@ export function AppDetail({ app }: { app: InstalledApp }) {
       </dl>
 
       <div className="flex flex-wrap items-center gap-2.5">
-        <Button kind="danger" icon="trash" disabled title="Arrives in v0.2">
+        <Button kind="danger" icon="trash" onClick={() => setUninstalling(true)}>
           Uninstall completely
         </Button>
         {app.installLocation && (
@@ -94,10 +96,7 @@ export function AppDetail({ app }: { app: InstalledApp }) {
         )}
       </div>
 
-      <Note>
-        <strong>Coming in v0.2:</strong> one-click uninstall that runs the app's own uninstaller, then finds everything it
-        left behind – files, registry keys, services, tasks, shortcuts – and moves them to quarantine.
-      </Note>
+      {uninstalling && <UninstallDialog app={app} onClose={() => setUninstalling(false)} />}
     </div>
   );
 }

@@ -21,6 +21,80 @@ export interface InstalledApp {
   registryKey: string;
 }
 
+/** Something UWiper can remove; the backend checks it against the safety rules. */
+export type Target =
+  | { kind: 'path'; path: string }
+  | { kind: 'registryKey'; key: string }
+  | { kind: 'registryValue'; key: string; name: string }
+  | { kind: 'service'; name: string }
+  | { kind: 'task'; path: string };
+
+export type Confidence = 'high' | 'medium' | 'low';
+
+export interface Leftover {
+  id: string;
+  kind: 'folder' | 'file' | 'shortcut' | 'registry' | 'service' | 'task' | 'startup';
+  label: string;
+  reason: string;
+  confidence: Confidence;
+  sizeBytes: number | null;
+  needsAdmin: boolean;
+  target: Target;
+}
+
+/** What the leftover scan needs to know about the app it follows. */
+export type AppRef = Pick<InstalledApp, 'id' | 'name' | 'publisher' | 'installLocation'>;
+
+export interface Removal {
+  label: string;
+  target: Target;
+  sizeBytes?: number;
+}
+
+export interface Problem {
+  label: string;
+  error: string;
+}
+
+export interface RemoveReport {
+  batchId: string | null;
+  removed: number;
+  freedBytes: number;
+  problems: Problem[];
+  notes: string[];
+}
+
+export interface RestoreReport {
+  restored: number;
+  problems: Problem[];
+  restartNeeded: boolean;
+}
+
+export interface QuarantineItem {
+  label: string;
+  target: Target;
+  sizeBytes: number;
+  note: string | null;
+}
+
+export interface Batch {
+  id: string;
+  title: string;
+  /** Unix time in seconds */
+  createdAt: number;
+  items: QuarantineItem[];
+}
+
+export interface CleanReport {
+  freedBytes: number;
+  skippedFiles: number;
+}
+
+export interface RestorePoint {
+  created: boolean;
+  message: string;
+}
+
 export type CleanupGroup = 'windows' | 'browsers' | 'developer' | 'apps';
 
 export interface CleanupItem {
@@ -43,6 +117,7 @@ export interface StartupItem {
   fileExists: boolean | null;
   enabled: boolean;
   isWindows: boolean;
+  removal: Target;
 }
 
 export interface ServiceItem {
@@ -53,6 +128,7 @@ export interface ServiceItem {
   startType: 'boot' | 'system' | 'automatic' | 'manual' | 'disabled';
   delayed: boolean;
   isWindows: boolean;
+  removal: Target;
 }
 
 export interface TaskItem {
@@ -65,6 +141,7 @@ export interface TaskItem {
   enabled: boolean;
   triggers: string;
   isWindows: boolean;
+  removal: Target;
 }
 
 export type DataDirKey = 'quarantine' | 'snapshots' | 'logs' | 'temp';

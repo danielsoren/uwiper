@@ -104,8 +104,19 @@
   }
 }
 
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
 @utility fade-in {
   animation: fade-in 0.25s ease-out;
+}
+
+@utility dialog-in {
+  animation: dialog-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 @utility scroll-thin {

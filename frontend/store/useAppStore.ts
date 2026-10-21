@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, errorText } from '../lib/api';
 import type {
+  Batch,
   CleanupItem,
   Environment,
   InstalledApp,
@@ -21,6 +22,7 @@ export interface Resources {
   services: ServiceItem[];
   tasks: TaskItem[];
   storage: StorageInfo;
+  quarantine: Batch[];
 }
 
 export type ResourceKey = keyof Resources;
@@ -39,6 +41,7 @@ const FETCH: { [K in ResourceKey]: () => Promise<Resources[K]> } = {
   services: api.listServices,
   tasks: api.listTasks,
   storage: api.storageInfo,
+  quarantine: api.listQuarantine,
 };
 
 const idle = <T>(): Resource<T> => ({ data: null, error: null, loading: false, requested: false });
@@ -61,6 +64,8 @@ interface AppState {
   init: () => void;
   /** Loads once per session; `force` loads again. */
   load: <K extends ResourceKey>(key: K, force?: boolean) => void;
+  /** Loads again whatever of these was loaded before, after something changed. */
+  refresh: (...keys: ResourceKey[]) => void;
   /** Applies a change right away and saves it; a failed save rolls it back. */
   updateSettings: (change: (s: Settings) => Settings) => void;
   notify: (text: string) => void;
@@ -79,7 +84,15 @@ export const useAppStore = create<AppState>()((set, get) => {
     ready: false,
     env: null,
     settings: null,
-    res: { apps: idle(), cleanup: idle(), startup: idle(), services: idle(), tasks: idle(), storage: idle() },
+    res: {
+      apps: idle(),
+      cleanup: idle(),
+      startup: idle(),
+      services: idle(),
+      tasks: idle(),
+      storage: idle(),
+      quarantine: idle(),
+    },
     toasts: [],
 
     go: (page) => set({ page }),
@@ -102,6 +115,10 @@ export const useAppStore = create<AppState>()((set, get) => {
         (data) => patch(key, { data, loading: false }),
         (e) => patch(key, { error: errorText(e), loading: false }),
       );
+    },
+
+    refresh: (...keys) => {
+      for (const key of keys) if (get().res[key].requested) get().load(key, true);
     },
 
     updateSettings: (change) => {

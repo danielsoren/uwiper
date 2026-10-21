@@ -131,13 +131,13 @@ export function System() {
 
       <PageBody>
         {tab === 'drivers' || !resource ? (
-          <Empty icon="cpu" title="Driver packages arrive in v0.2">
+          <Empty icon="cpu" title="Driver packages arrive in v0.3">
             UWiper will list the third-party driver packages in the Driver Store and show which ones no device uses anymore – old
             GPU drivers alone can take gigabytes.
           </Empty>
         ) : (
           <>
-            <Note>{HINT[tab as Exclude<Tab, 'drivers'>]} Read-only in this version.</Note>
+            <Note>{HINT[tab as Exclude<Tab, 'drivers'>]} Entries that point to missing files can be removed on the Leftovers page.</Note>
             {resource.error && (
               <Callout
                 message={resource.error}
