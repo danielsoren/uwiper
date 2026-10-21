@@ -74,7 +74,7 @@ npm run typecheck
 cd backend && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-To regenerate the app icons after changing the logo: `npx tauri icon assets/logo.svg -o backend/icons`, then delete the mobile and macOS outputs.
+To regenerate the app icons after changing the logo: `npx tauri icon assets/logo.svg -o backend/icons`, then keep only `32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.png` and `icon.ico`.
 
 ### Releasing
 

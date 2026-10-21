@@ -85,7 +85,7 @@ export function Sidebar() {
     <aside aria-label="Navigation" className="scroll-thin flex flex-[0_0_236px] flex-col gap-0.5 overflow-y-auto border-r border-line-2 bg-sidebar px-3 pb-3.5 pt-3">
       {settings?.appearance.windowButtons === 'macos' ? <TrafficLights /> : <div className="h-2" data-tauri-drag-region />}
       <div className="flex items-center gap-2.5 px-2 pb-4 pt-1" data-tauri-drag-region>
-        <Logo color={settings?.appearance.accent ?? '#0071E3'} />
+        <Logo size={32} />
         <div data-tauri-drag-region>
           <div className="text-title font-bold tracking-[-0.01em]">UWiper</div>
           <div className="text-micro text-fg-4">Ultimate system cleaner</div>
