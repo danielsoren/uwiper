@@ -36,6 +36,8 @@ enum Spec {
     File(&'static str),
     /// Files in a folder whose names start with a prefix.
     Prefixed(&'static str, &'static str),
+    /// Folders in a folder whose names start with a prefix.
+    DirsPrefixed(&'static str, &'static str),
     /// Files in a folder whose names end with a suffix, such as ".log".
     Ending(&'static str, &'static str),
     /// In every subfolder of a folder whose name starts with a prefix, these
@@ -90,7 +92,10 @@ const DEFS: &[Def] = &[
             Spec::Dir(r"%LOCALAPPDATA%\NVIDIA\DXCache"),
             Spec::Dir(r"%LOCALAPPDATA%\NVIDIA\GLCache"),
             Spec::Dir(r"%LOCALAPPDATA%\AMD\DxCache"),
+            Spec::Dir(r"%ProgramData%\NVIDIA Corporation\NV_Cache"),
         ] },
+    Def { id: "inetcache", group: "windows", name: "Internet cache", description: "Web content cached by Windows and older apps", default_on: true,
+        specs: &[Spec::Dir(r"%LOCALAPPDATA%\Microsoft\Windows\INetCache")] },
     Def { id: "thumbnails", group: "windows", name: "Thumbnail cache", description: "Explorer previews, rebuilt on demand", default_on: true,
         specs: &[Spec::Prefixed(r"%LOCALAPPDATA%\Microsoft\Windows\Explorer", "thumbcache_")] },
     Def { id: "recycle-bin", group: "windows", name: "Recycle Bin", description: "Files you deleted – emptying it can't be undone", default_on: false,
@@ -150,6 +155,8 @@ const DEFS: &[Def] = &[
             Spec::Dir(r"%LOCALAPPDATA%\electron-builder\Cache"),
             Spec::Dir(r"%LOCALAPPDATA%\node-gyp\Cache"),
         ] },
+    Def { id: "unreal", group: "developer", name: "Unreal Engine – shared cache", description: "Derived data, rebuilt when projects open", default_on: false,
+        specs: &[Spec::Dir(r"%LOCALAPPDATA%\UnrealEngine\Common\DerivedDataCache")] },
     Def { id: "jetbrains", group: "developer", name: "JetBrains IDE caches", description: "Indexes are rebuilt when a project opens", default_on: false,
         specs: &[Spec::Children(r"%LOCALAPPDATA%\JetBrains", "", &["caches"])] },
 
@@ -170,6 +177,16 @@ const DEFS: &[Def] = &[
         ] },
     Def { id: "steam", group: "apps", name: "Steam – web cache", description: "Store and community pages; games are kept", default_on: true,
         specs: &[Spec::Dir(r"%LOCALAPPDATA%\Steam\htmlcache")] },
+    Def { id: "epic", group: "apps", name: "Epic Games Launcher – web cache", description: "Store pages; games are kept", default_on: true,
+        specs: &[Spec::DirsPrefixed(r"%LOCALAPPDATA%\EpicGamesLauncher\Saved", "webcache")] },
+    Def { id: "battlenet", group: "apps", name: "Battle.net – cache", description: "Launcher and store pages; games are kept", default_on: true,
+        specs: &[Spec::Dir(r"%LOCALAPPDATA%\Battle.net\BrowserCaches"), Spec::Dir(r"%LOCALAPPDATA%\Battle.net\Cache")] },
+    Def { id: "adobe-media", group: "apps", name: "Adobe media cache", description: "Premiere Pro and After Effects rebuild it when a project opens", default_on: false,
+        specs: &[
+            Spec::Dir(r"%APPDATA%\Adobe\Common\Media Cache Files"),
+            Spec::Dir(r"%APPDATA%\Adobe\Common\Media Cache"),
+            Spec::Dir(r"%APPDATA%\Adobe\Common\Peak Files"),
+        ] },
     Def { id: "spotify", group: "apps", name: "Spotify – cache", description: "Streaming cache; offline downloads are kept", default_on: false,
         specs: &[Spec::Dir(r"%LOCALAPPDATA%\Spotify\Data")] },
 ];
@@ -180,11 +197,11 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-fn files_where(dir: &str, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+fn entries_where(dir: &str, dirs: bool, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     std::fs::read_dir(expand_env(dir))
         .map(|it| {
             it.flatten()
-                .filter(|e| e.path().is_file() && keep(&e.file_name().to_string_lossy().to_lowercase()))
+                .filter(|e| e.path().is_dir() == dirs && keep(&e.file_name().to_string_lossy().to_lowercase()))
                 .map(|e| e.path())
                 .collect()
         })
@@ -195,8 +212,9 @@ fn resolve(spec: &Spec) -> Vec<PathBuf> {
     let existing = |p: PathBuf| p.exists().then_some(p);
     match spec {
         Spec::Dir(p) | Spec::File(p) => existing(PathBuf::from(expand_env(p))).into_iter().collect(),
-        Spec::Prefixed(dir, prefix) => files_where(dir, |name| name.starts_with(&prefix.to_lowercase())),
-        Spec::Ending(dir, suffix) => files_where(dir, |name| name.ends_with(&suffix.to_lowercase())),
+        Spec::Prefixed(dir, prefix) => entries_where(dir, false, |name| name.starts_with(&prefix.to_lowercase())),
+        Spec::DirsPrefixed(dir, prefix) => entries_where(dir, true, |name| name.starts_with(&prefix.to_lowercase())),
+        Spec::Ending(dir, suffix) => entries_where(dir, false, |name| name.ends_with(&suffix.to_lowercase())),
         Spec::Children(root, prefix, subs) => subdirs(Path::new(&expand_env(root)))
             .into_iter()
             .filter(|child| {
@@ -210,19 +228,7 @@ fn resolve(spec: &Spec) -> Vec<PathBuf> {
                     .collect::<Vec<_>>()
             })
             .collect(),
-        Spec::Chromium(user_data) => {
-            let root = PathBuf::from(expand_env(user_data));
-            let mut out: Vec<PathBuf> = ["GrShaderCache", "ShaderCache"]
-                .iter()
-                .filter_map(|d| existing(root.join(d)))
-                .collect();
-            for profile in subdirs(&root) {
-                for d in ["Cache", "Code Cache", "GPUCache"] {
-                    out.extend(existing(profile.join(d)));
-                }
-            }
-            out
-        }
+        Spec::Chromium(user_data) => chromium_caches(Path::new(&expand_env(user_data))),
         Spec::Firefox(profiles) => subdirs(Path::new(&expand_env(profiles)))
             .into_iter()
             .filter_map(|p| existing(p.join("cache2")))
@@ -311,63 +317,212 @@ const NOT_APPS: [&str; 14] = [
 
 struct Detected {
     id: String,
+    group: &'static str,
     name: String,
-    folders: Vec<String>,
+    description: String,
     paths: Vec<PathBuf>,
-    /// Chromium-style caches (Electron apps): safe to clean by default.
-    chromium: bool,
+    default_on: bool,
+    /// Store apps' tiny caches aren't worth a row.
+    min_bytes: u64,
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Browsers found by their layout rather than by name: any Chromium browser
+/// (a "User Data" folder with profiles) and any Firefox-based one
+/// ("Profiles" with `cache2` inside), wherever its vendor put it.
+fn detect_browsers(known: &[String]) -> Vec<Detected> {
+    let mut out = Vec::new();
+    for root in ["%LOCALAPPDATA%", "%APPDATA%"]
+        .iter()
+        .map(|r| expand_env(r))
+        .filter(|r| !r.contains('%'))
+    {
+        let walker = walkdir::WalkDir::new(&root)
+            .min_depth(1)
+            .max_depth(3)
+            .follow_links(false);
+        for entry in walker
+            .into_iter()
+            .filter_entry(|e| !NOT_APPS.contains(&name_of(e.path()).to_lowercase().as_str()))
+        {
+            let Ok(entry) = entry else { continue };
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let dir = entry.path();
+            let kind = match name_of(dir).to_lowercase().as_str() {
+                "user data" => Spec::Chromium(""),
+                "profiles" => Spec::Firefox(""),
+                _ => continue,
+            };
+            let paths: Vec<PathBuf> = match kind {
+                Spec::Chromium(_) => chromium_caches(dir),
+                _ => subdirs(dir)
+                    .into_iter()
+                    .map(|p| p.join("cache2"))
+                    .filter(|p| p.is_dir())
+                    .collect(),
+            };
+            let canon = canonical(&dir.to_string_lossy());
+            let covered = paths.iter().any(|p| known.contains(&canonical(&p.to_string_lossy())));
+            if paths.is_empty() || covered {
+                continue;
+            }
+            let product = dir.parent().map(name_of).unwrap_or_default();
+            out.push(Detected {
+                id: format!("found:{canon}"),
+                group: "browsers",
+                name: format!("{product} – cache"),
+                description: format!("{BROWSER_NOTE} · found by its layout"),
+                paths,
+                default_on: true,
+                min_bytes: 0,
+            });
+        }
+    }
+    out
+}
+
+fn chromium_caches(user_data: &Path) -> Vec<PathBuf> {
+    let existing = |p: PathBuf| p.is_dir().then_some(p);
+    let mut out: Vec<PathBuf> = ["GrShaderCache", "ShaderCache"]
+        .iter()
+        .filter_map(|d| existing(user_data.join(d)))
+        .collect();
+    for profile in subdirs(user_data) {
+        for d in ["Cache", "Code Cache", "GPUCache"] {
+            out.extend(existing(profile.join(d)));
+        }
+    }
+    out
+}
+
+/// Cache folders, by name, up to `depth` levels below `dir`.
+fn cache_folders(dir: &Path, depth: usize) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut walker = walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .max_depth(depth)
+        .follow_links(false)
+        .into_iter();
+    while let Some(Ok(entry)) = walker.next() {
+        if entry.file_type().is_dir() && CACHE_NAMES.contains(&name_of(entry.path()).to_lowercase().as_str()) {
+            paths.push(entry.path().to_path_buf());
+            walker.skip_current_dir();
+        }
+    }
+    paths
+}
+
+fn folder_names(paths: &[PathBuf]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in paths.iter().map(|p| name_of(p)) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Chromium-style caches (Electron apps) are safe to clean by default.
+fn chromium_style(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case("gpucache") || f.eq_ignore_ascii_case("code cache"))
 }
 
 /// App folders in AppData with cache folders inside (up to three levels
 /// down), skipping apps the known list already covers.
-fn detect(known: &[String], own: &[String]) -> Vec<Detected> {
+fn detect_apps(known: &[String], own: &[String]) -> Vec<Detected> {
     let roots = ["%APPDATA%", "%LOCALAPPDATA%", r"%USERPROFILE%\AppData\LocalLow"];
     let mut out = Vec::new();
     for root in roots.iter().map(|r| expand_env(r)).filter(|r| !r.contains('%')) {
         for app in subdirs(Path::new(&root)) {
-            let app_name = app
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let app_name = name_of(&app);
             let app_canon = canonical(&app.to_string_lossy());
             let covered = known.iter().any(|k| is_within(k, &app_canon));
             let ours = own.iter().any(|o| is_within(o, &app_canon) || is_within(&app_canon, o));
             if NOT_APPS.contains(&app_name.to_lowercase().as_str()) || app_name.starts_with('.') || covered || ours {
                 continue;
             }
-            let mut paths = Vec::new();
-            let mut folders = Vec::new();
-            let mut walker = walkdir::WalkDir::new(&app)
-                .min_depth(1)
-                .max_depth(3)
-                .follow_links(false)
-                .into_iter();
-            while let Some(Ok(entry)) = walker.next() {
-                if !entry.file_type().is_dir() {
-                    continue;
-                }
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if CACHE_NAMES.contains(&name.to_lowercase().as_str()) {
-                    paths.push(entry.path().to_path_buf());
-                    if !folders.contains(&name) {
-                        folders.push(name);
-                    }
-                    walker.skip_current_dir();
-                }
-            }
+            let paths = cache_folders(&app, 3);
             if paths.is_empty() {
                 continue;
             }
-            let lower: Vec<String> = folders.iter().map(|f| f.to_lowercase()).collect();
+            let names = folder_names(&paths);
             out.push(Detected {
                 id: format!("found:{app_canon}"),
-                chromium: lower.iter().any(|f| f == "gpucache" || f == "code cache"),
-                name: app_name,
-                folders,
+                group: "apps",
+                name: format!("{app_name} – cache"),
+                description: format!("Found by folder name: {}", names.join(", ")),
+                default_on: chromium_style(&names),
                 paths,
+                min_bytes: 0,
             });
         }
     }
+    out
+}
+
+/// "5319275A.WhatsAppDesktop_cv1g1gvanyjgm" → "WhatsAppDesktop"
+fn package_name(family: &str) -> String {
+    let base = family.split('_').next().unwrap_or(family);
+    base.rsplit('.').next().unwrap_or(base).to_string()
+}
+
+/// Microsoft Store apps keep their caches in their package folder: the
+/// web cache and temp folders Windows gives every app, plus cache folders
+/// by name in LocalCache. LocalCache itself can hold real data, so it is
+/// never emptied as a whole.
+fn detect_store_apps(own: &[String]) -> Vec<Detected> {
+    let packages = PathBuf::from(expand_env(r"%LOCALAPPDATA%\Packages"));
+    let mut out = Vec::new();
+    for pkg in subdirs(&packages) {
+        let pkg_canon = canonical(&pkg.to_string_lossy());
+        if own.iter().any(|o| is_within(o, &pkg_canon)) {
+            continue;
+        }
+        let mut paths: Vec<PathBuf> = [r"AC\INetCache", r"AC\Temp", "TempState"]
+            .iter()
+            .map(|d| pkg.join(d))
+            .filter(|p| p.is_dir())
+            .collect();
+        let named = cache_folders(&pkg.join("LocalCache"), 5);
+        let names = folder_names(&named);
+        paths.extend(named);
+        if paths.is_empty() {
+            continue;
+        }
+        out.push(Detected {
+            id: format!("found:{pkg_canon}"),
+            group: "apps",
+            name: format!("{} (Store app) – cache", package_name(&name_of(&pkg))),
+            description: "Web cache and temporary files of a Microsoft Store app".into(),
+            default_on: names.is_empty() || chromium_style(&names),
+            paths,
+            min_bytes: 1024 * 1024,
+        });
+    }
+    out
+}
+
+/// Everything found beyond the known list.
+fn detect(known: &[String], own: &[String]) -> Vec<Detected> {
+    let browsers = detect_browsers(known);
+    let mut known = known.to_vec();
+    known.extend(
+        browsers
+            .iter()
+            .flat_map(|b| b.paths.iter().map(|p| canonical(&p.to_string_lossy()))),
+    );
+    let mut out = browsers;
+    out.extend(detect_apps(&known, own));
+    out.extend(detect_store_apps(own));
     out
 }
 
@@ -394,12 +549,15 @@ pub async fn scan_cleanup(state: State<'_, AppState>) -> Result<Vec<CleanupItem>
         let detected = detect(&known_paths(), &own_dirs(&settings));
         let sizes = parallel_map(&detected, |d| measure_paths(&d.paths));
         for (d, (size_bytes, file_count)) in detected.into_iter().zip(sizes) {
+            if size_bytes < d.min_bytes {
+                continue;
+            }
             items.push(CleanupItem {
                 id: d.id,
-                group: "apps",
-                name: format!("{} – cache", d.name),
-                description: format!("Found by folder name: {}", d.folders.join(", ")),
-                default_on: d.chromium,
+                group: d.group,
+                name: d.name,
+                description: d.description,
+                default_on: d.default_on,
                 detected: true,
                 size_bytes,
                 file_count,
@@ -443,7 +601,7 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
         }
         if ids.iter().any(|id| id.starts_with("found:")) {
             for d in detect(&known_paths(), &own).into_iter().filter(|d| ids.contains(&d.id)) {
-                jobs.push((format!("{} – cache", d.name), d.paths));
+                jobs.push((d.name, d.paths));
             }
         }
         for (name, paths) in jobs {
@@ -597,12 +755,21 @@ mod tests {
         std::env::set_var("LOCALAPPDATA", root.join("none"));
         std::env::set_var("USERPROFILE", root.join("none"));
 
+        std::fs::create_dir_all(root.join("Thorium/User Data/Default/Cache")).unwrap();
+        std::fs::create_dir_all(root.join("Waterfox/Profiles/abc.default/cache2")).unwrap();
+
         let known = vec![canonical(&root.join("Known/Cache").to_string_lossy())];
         let found = detect(&known, &[]);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "SomeApp");
-        assert!(found[0].chromium);
-        assert_eq!(found[0].paths.len(), 2, "the nested Cache, not its Cache_Data");
+        let names: Vec<&str> = found.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names.len(), 3, "{names:?}");
+        assert!(names.contains(&"Thorium – cache") && names.contains(&"Waterfox – cache"));
+        let app = found.iter().find(|d| d.name == "SomeApp – cache").unwrap();
+        assert!(app.default_on);
+        assert_eq!(app.paths.len(), 2, "the nested Cache, not its Cache_Data");
+        assert_eq!(
+            package_name("5319275A.WhatsAppDesktop_cv1g1gvanyjgm"),
+            "WhatsAppDesktop"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

@@ -260,6 +260,34 @@ pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -
     results.into_inner().unwrap().into_iter().flatten().collect()
 }
 
+/// Size, file count and the newest change (Unix time) of a file or of
+/// everything in a folder. Links aren't followed.
+pub fn dir_stats(path: &Path) -> (u64, u64, Option<u64>) {
+    let secs = |m: &std::fs::Metadata| {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    };
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return (0, 0, None);
+    };
+    if !meta.is_dir() {
+        return (meta.len(), 1, secs(&meta));
+    }
+    let (mut bytes, mut files, mut newest) = (0u64, 0u64, secs(&meta));
+    for entry in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
+        if let Ok(m) = entry.metadata() {
+            newest = newest.max(secs(&m));
+            if entry.file_type().is_file() {
+                bytes += m.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files, newest)
+}
+
 /// Total size of all files below `path`, skipping anything unreadable.
 pub fn dir_size(path: &Path) -> (u64, u64) {
     let mut bytes = 0u64;

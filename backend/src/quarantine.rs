@@ -123,7 +123,7 @@ fn save(dir: &Path, batch: &Batch) -> Result<()> {
 /// still in use by its own service when it's moved; folders go last.
 fn removal_order(target: &Target) -> u8 {
     match target {
-        Target::Service { .. } | Target::Task { .. } | Target::RegistryValue { .. } => 0,
+        Target::Service { .. } | Target::Task { .. } | Target::RegistryValue { .. } | Target::PathEntry { .. } => 0,
         Target::RegistryKey { .. } => 1,
         Target::Path { .. } => 2,
     }
