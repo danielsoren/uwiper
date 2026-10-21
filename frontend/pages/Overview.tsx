@@ -6,7 +6,7 @@ import { formatBytes, plural } from '../lib/format';
 import { useResource } from '../store/hooks';
 import { brokenEntries } from '../store/selectors';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Card, Icon, IconTile, Spinner } from '../ui';
+import { Button, Card, Icon, IconTile, Skeleton } from '../ui';
 
 function BigNumber({ bytes }: { bytes: number }) {
   const [value, unit] = formatBytes(bytes).split(' ');
@@ -35,13 +35,13 @@ export function Overview() {
   const safeBytes = items.filter((i) => i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
   const optionalBytes = items.filter((i) => !i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
   const broken = brokenEntries(startup.data, services.data, tasks.data);
-  const reportedBytes = (apps.data ?? []).reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
+  const appBytes = (apps.data ?? []).reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
   const outside = (storage.data?.dirs ?? []).filter((d) => !d.inside).length + (settings?.footprint.startWithWindows ? 1 : 0);
 
   return (
     <>
       <PageHeader title="Overview" subtitle="A read-only look at your PC – this version shows, it doesn't remove anything yet">
-        <Button icon="refresh" onClick={rescan}>
+        <Button icon="refresh" onClick={rescan} busy={[cleanup, apps, startup, services, tasks].some((r) => r.loading)}>
           Scan again
         </Button>
       </PageHeader>
@@ -50,10 +50,7 @@ export function Overview() {
           <div className="min-w-0 flex-[1_1_280px]">
             <h2 className="text-small font-semibold uppercase tracking-[.06em] text-fg-3">Caches you could free</h2>
             {cleanup.loading && !cleanup.data ? (
-              <div className="mt-2 flex h-14 items-center gap-3 text-fg-3">
-                <Spinner size={26} />
-                Measuring caches…
-              </div>
+              <Skeleton className="mt-2 h-14 w-52 rounded-xl" />
             ) : (
               <BigNumber bytes={safeBytes} />
             )}
@@ -75,7 +72,7 @@ export function Overview() {
             value={apps.data ? String(apps.data.length) : null}
             loading={apps.loading}
             label="Installed apps"
-            sub={apps.error ?? `${formatBytes(reportedBytes)} reported by installers`}
+            sub={apps.error ?? (apps.data ? `${formatBytes(appBytes)} on disk` : 'Measuring sizes…')}
             onClick={() => go('apps')}
           />
           <StatCard
@@ -93,7 +90,7 @@ export function Overview() {
             value={startup.data ? String(startup.data.filter((i) => i.enabled).length) : null}
             loading={startup.loading}
             label="Start with Windows"
-            sub={startup.error ?? `${plural(startup.data?.length ?? 0, 'entry', 'entries')} in total`}
+            sub={startup.error ?? (startup.data ? `${plural(startup.data.length, 'entry', 'entries')} in total` : 'Reading…')}
             onClick={() => go('system')}
           />
           <StatCard icon="archive" tone="green" value="Empty" label="Quarantine" sub="Nothing has been removed yet" onClick={() => go('quarantine')} />

@@ -75,7 +75,12 @@ mod imp {
             let image = key.get_value::<String, _>("ImagePath").ok();
             let binary = service_dll
                 .map(|dll| normalize_system_path(&expand_env(&dll)))
-                .or_else(|| image.as_deref().and_then(command_executable).map(|exe| normalize_system_path(&exe)));
+                .or_else(|| {
+                    image
+                        .as_deref()
+                        .and_then(command_executable)
+                        .map(|exe| normalize_system_path(&exe))
+                });
             let display_name = key
                 .get_value::<String, _>("DisplayName")
                 .ok()

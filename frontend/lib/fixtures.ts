@@ -32,6 +32,9 @@ const app = (
   installLocation: location,
   installDate: date,
   sizeBytes: sizeMb * MB,
+  reportedBytes: sizeMb * MB,
+  folderBytes: location ? sizeMb * MB : null,
+  icon: null,
   source,
   scope,
   arch: scope === 'user' ? null : 'x64',
@@ -119,13 +122,16 @@ const environment: Environment = { elevated: false, windows: true, material: 'no
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// `?delay=3000` in the URL slows the scans down, to look at loading states.
+const extraDelay = Number(new URLSearchParams(window.location.search).get('delay')) || 0;
+
 export async function fixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
-  await delay(command === 'scan_cleanup' ? 900 : 250);
+  const atStart = command === 'environment' || command === 'get_settings';
+  await delay(atStart ? 50 : (command === 'scan_cleanup' ? 900 : 250) + extraDelay);
   const result = ((): unknown => {
     switch (command) {
       case 'environment': return environment;
       case 'list_apps': return apps;
-      case 'folder_size': return 734 * MB;
       case 'scan_cleanup': return cleanup;
       case 'list_startup': return startup;
       case 'list_services': return services;

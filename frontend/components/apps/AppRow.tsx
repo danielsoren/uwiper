@@ -4,7 +4,7 @@ import type { InstalledApp } from '../../lib/types';
 import { Tag } from '../../ui';
 import { AppTile } from './AppTile';
 
-export function AppRow({ app, selected, sizeBytes, onSelect }: { app: InstalledApp; selected: boolean; sizeBytes: number | null; onSelect: () => void }) {
+export function AppRow({ app, selected, onSelect }: { app: InstalledApp; selected: boolean; onSelect: () => void }) {
   return (
     <button
       type="button"
@@ -16,7 +16,7 @@ export function AppRow({ app, selected, sizeBytes, onSelect }: { app: InstalledA
         selected ? 'bg-accent text-white' : 'hover:bg-hover',
       )}
     >
-      <AppTile name={app.name} />
+      <AppTile name={app.name} icon={app.icon} />
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="truncate text-label font-semibold">{app.name}</span>
         <span className={cn('truncate text-small', selected ? 'text-white/82' : 'text-fg-3')}>{app.publisher ?? 'Unknown publisher'}</span>
@@ -24,7 +24,7 @@ export function AppRow({ app, selected, sizeBytes, onSelect }: { app: InstalledA
       {app.source === 'msi' && <Tag inverted={selected}>MSI</Tag>}
       {app.scope === 'user' && <Tag inverted={selected}>User</Tag>}
       <span className={cn('w-16 flex-none text-right text-meta tabular-nums', selected ? 'text-white/82' : 'text-fg-3')}>
-        {formatBytes(sizeBytes)}
+        {formatBytes(app.sizeBytes)}
       </span>
     </button>
   );

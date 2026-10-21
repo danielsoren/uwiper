@@ -11,11 +11,11 @@ import {
   IconTile,
   ListCard,
   ListRow,
-  Loading,
   Note,
   Pill,
   SegmentCount,
   Segmented,
+  SkeletonRows,
   Switch,
   type IconName,
   type PillTone,
@@ -145,7 +145,7 @@ export function System() {
                 onAction={resource.error.includes('administrator') ? restartAsAdmin : resource.reload}
               />
             )}
-            {resource.loading && !resource.data && <Loading label="Reading…" />}
+            {resource.loading && !resource.data && <SkeletonRows rows={8} />}
             {resource.data && visible.length === 0 && (
               <Empty icon="check" title={problemsOnly ? 'No problems here' : 'Nothing to show'}>
                 {hideWindows && !problemsOnly ? 'Windows items are hidden.' : undefined}

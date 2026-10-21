@@ -62,7 +62,11 @@ pub fn resolve_executable(command: &str) -> Option<String> {
     if exe.contains('\\') || exe.contains('/') {
         return Some(exe);
     }
-    let name = if Path::new(&exe).extension().is_some() { exe } else { format!("{exe}.exe") };
+    let name = if Path::new(&exe).extension().is_some() {
+        exe
+    } else {
+        format!("{exe}.exe")
+    };
     let windir = windows_dir();
     let mut dirs = vec![format!(r"{windir}\System32"), windir];
     if let Some(path) = std::env::var_os("PATH") {
@@ -122,6 +126,27 @@ pub fn is_windows_path(path: &str) -> bool {
     p.starts_with(&format!("{windir}\\"))
 }
 
+/// Runs `f` on every item using a few threads; results keep the input order.
+pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let next = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<R>>> = Mutex::new(items.iter().map(|_| None).collect());
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(2, 8);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(i) else { break };
+                let r = f(item);
+                results.lock().unwrap()[i] = Some(r);
+            });
+        }
+    });
+    results.into_inner().unwrap().into_iter().flatten().collect()
+}
+
 /// Total size of all files below `path`, skipping anything unreadable.
 pub fn dir_size(path: &Path) -> (u64, u64) {
     let mut bytes = 0u64;
@@ -142,6 +167,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parallel_map_keeps_order() {
+        let items: Vec<u32> = (0..100).collect();
+        assert_eq!(
+            parallel_map(&items, |n| n * 2),
+            items.iter().map(|n| n * 2).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn expands_known_and_keeps_unknown_variables() {
         std::env::set_var("UWIPER_TEST_DIR", r"C:\Data");
         assert_eq!(expand_env(r"%UWIPER_TEST_DIR%\cache"), r"C:\Data\cache");
@@ -159,7 +193,10 @@ mod tests {
             command_executable(r"C:\Program Files\App\app.exe /background").as_deref(),
             Some(r"C:\Program Files\App\app.exe")
         );
-        assert_eq!(command_executable("rundll32 shell32.dll,Foo").as_deref(), Some("rundll32"));
+        assert_eq!(
+            command_executable("rundll32 shell32.dll,Foo").as_deref(),
+            Some("rundll32")
+        );
         assert_eq!(
             command_executable(r"C:\Windows\system32\svchost.exe -k netsvcs").as_deref(),
             Some(r"C:\Windows\system32\svchost.exe")
@@ -170,8 +207,14 @@ mod tests {
     #[test]
     fn normalizes_service_paths() {
         std::env::set_var("SystemRoot", r"C:\Windows");
-        assert_eq!(normalize_system_path(r"\SystemRoot\System32\drivers\x.sys"), r"C:\Windows\System32\drivers\x.sys");
-        assert_eq!(normalize_system_path(r"System32\drivers\y.sys"), r"C:\Windows\System32\drivers\y.sys");
+        assert_eq!(
+            normalize_system_path(r"\SystemRoot\System32\drivers\x.sys"),
+            r"C:\Windows\System32\drivers\x.sys"
+        );
+        assert_eq!(
+            normalize_system_path(r"System32\drivers\y.sys"),
+            r"C:\Windows\System32\drivers\y.sys"
+        );
         assert_eq!(normalize_system_path(r"\??\D:\Tools\svc.exe"), r"D:\Tools\svc.exe");
         assert_eq!(normalize_system_path("svchost.exe"), r"C:\Windows\System32\svchost.exe");
     }

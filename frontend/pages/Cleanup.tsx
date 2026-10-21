@@ -8,7 +8,7 @@ import { cn } from '../lib/cn';
 import { formatBytes, plural } from '../lib/format';
 import { useResource } from '../store/hooks';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Callout, Card, Icon, ListCard, ListRow, Loading, Note, Spinner, Tag } from '../ui';
+import { Button, Callout, Card, Icon, ListCard, ListRow, Note, Skeleton, SkeletonRows, Tag } from '../ui';
 
 export function Cleanup() {
   const attempt = useAppStore((s) => s.attempt);
@@ -23,16 +23,26 @@ export function Cleanup() {
   return (
     <>
       <PageHeader title="Cleanup" subtitle="Caches, temporary files and logs that Windows and your apps rebuild on their own">
-        <Button icon="refresh" onClick={cleanup.reload} disabled={cleanup.loading}>
+        <Button icon="refresh" onClick={cleanup.reload} busy={cleanup.loading}>
           Scan again
         </Button>
         <Button kind="primary" icon="sparkle" disabled title="Arrives in v0.2">
-          Clean {formatBytes(safe)}
+          {cleanup.data ? `Clean ${formatBytes(safe)}` : 'Clean'}
         </Button>
       </PageHeader>
       <PageBody>
         {cleanup.error && <Callout message={cleanup.error} action="Try again" onAction={cleanup.reload} />}
-        {!cleanup.data && cleanup.loading && <Loading label="Measuring caches – big ones can take a moment…" />}
+        {!cleanup.data && cleanup.loading && (
+          <>
+            <Card className="flex flex-col gap-3 px-7 py-[26px]">
+              <Skeleton className="w-24" />
+              <Skeleton className="h-14 w-52 rounded-xl" />
+              <Skeleton className="w-80 max-w-full" />
+            </Card>
+            <SkeletonRows rows={4} tile={false} />
+            <SkeletonRows rows={3} tile={false} />
+          </>
+        )}
 
         {cleanup.data && (
           <>
@@ -59,7 +69,6 @@ export function Cleanup() {
                 <div className="flex min-h-14 items-center gap-3 px-4 py-2.5">
                   <Icon name={CLEANUP_GROUPS[g.group].icon} style={{ color: CLEANUP_GROUPS[g.group].color }} />
                   <h2 className="flex-1 text-[14.5px] font-semibold">{CLEANUP_GROUPS[g.group].label}</h2>
-                  {cleanup.loading && <Spinner size={14} />}
                   <span className="text-small text-fg-3">{formatBytes(g.bytes)}</span>
                 </div>
                 {g.items.map((i) => (

@@ -3,7 +3,7 @@ import { plural } from '../lib/format';
 import { useResource } from '../store/hooks';
 import { brokenEntries } from '../store/selectors';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Callout, Empty, GroupTitle, IconTile, ListCard, ListRow, Loading, Note, Pill, type IconName } from '../ui';
+import { Button, Callout, Empty, GroupTitle, IconTile, ListCard, ListRow, Note, Pill, SkeletonRows, type IconName } from '../ui';
 
 interface Row {
   key: string;
@@ -49,7 +49,7 @@ export function Leftovers() {
         title="Leftovers"
         subtitle={ready ? `${plural(broken.total, 'entry', 'entries')} left behind by apps that are already gone` : 'Looking for entries left behind by removed apps…'}
       >
-        <Button icon="refresh" onClick={() => [startup, services, tasks].forEach((r) => r.reload())}>
+        <Button icon="refresh" onClick={() => [startup, services, tasks].forEach((r) => r.reload())} busy={loading}>
           Rescan
         </Button>
       </PageHeader>
@@ -59,7 +59,7 @@ export function Leftovers() {
           leftover folders and registry keys to the apps that created them arrives in v0.2, together with removing them.
         </Note>
 
-        {!ready && loading && <Loading label="Checking startup entries, services and scheduled tasks…" />}
+        {!ready && loading && <SkeletonRows rows={4} />}
         {ready && !loading && broken.total === 0 && (
           <Empty icon="check" title="Nothing pointing nowhere">
             Every startup entry, service and scheduled task we could read points to a file that exists.

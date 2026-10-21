@@ -1,5 +1,5 @@
 import { PageBody, PageHeader } from '../components/layout/Page';
-import { DataDirRow } from '../components/settings/DataDirRow';
+import { DataDirPlaceholders, DataDirRow } from '../components/settings/DataDirRow';
 import { ExclusionList } from '../components/settings/ExclusionList';
 import { Locked, SettingsRow, SettingsSection } from '../components/settings/SettingsSection';
 import { api } from '../lib/api';
@@ -7,7 +7,7 @@ import { formatBytes, plural } from '../lib/format';
 import type { Settings as SettingsT } from '../lib/types';
 import { useResource } from '../store/hooks';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Card, Chip, IconTile, Loading, Pill, Segmented, Swatch, Switch } from '../ui';
+import { Button, Card, Chip, IconTile, Loading, Pill, Segmented, Skeleton, Swatch, Switch } from '../ui';
 
 const ACCENTS: [string, string][] = [
   ['#0071E3', 'Blue'],
@@ -58,7 +58,7 @@ export function Settings() {
   return (
     <>
       <PageHeader title="Settings" subtitle="Changes are saved right away" />
-      <PageBody narrow>
+      <PageBody>
         <Card padded className="flex flex-wrap items-center gap-4">
           <IconTile icon="folder" large />
           <div className="min-w-0 flex-1">
@@ -66,10 +66,14 @@ export function Settings() {
               {outsideDirs ? `UWiper folder plus ${plural(outsideDirs, 'custom location', 'custom locations')}` : 'Everything UWiper has is in one folder'}
             </h2>
             <div className="mt-1 select-text break-all font-mono text-small text-fg-path">{info?.home ?? env?.home ?? '…'}</div>
-            <div className="text-small text-fg-3">
-              {info ? `${formatBytes(info.homeSizeBytes)} inside` : 'Measuring…'} ·{' '}
-              {outside === 0 ? 'nothing anywhere else' : `${plural(outside, 'thing', 'things')} elsewhere, all listed below`}
-            </div>
+            {info ? (
+              <div className="text-small text-fg-3">
+                {formatBytes(info.homeSizeBytes)} inside ·{' '}
+                {outside === 0 ? 'nothing anywhere else' : `${plural(outside, 'thing', 'things')} elsewhere, all listed below`}
+              </div>
+            ) : (
+              <Skeleton className="mt-1.5 h-2.5 w-56" />
+            )}
           </div>
           {info && (
             <Button small icon="folder" onClick={() => attempt(() => api.openFolder(info.home))}>
@@ -90,9 +94,13 @@ export function Settings() {
             mono={info?.settingsFile}
             control={<Locked>Always next to UWiper</Locked>}
           />
-          {(info?.dirs ?? []).map((dir) => (
-            <DataDirRow key={dir.key} dir={dir} editable={!st.oneFolder} onSave={(path) => set('storage', { [dir.key]: path })} />
-          ))}
+          {info ? (
+            info.dirs.map((dir) => (
+              <DataDirRow key={dir.key} dir={dir} editable={!st.oneFolder} onSave={(path) => set('storage', { [dir.key]: path })} />
+            ))
+          ) : (
+            <DataDirPlaceholders />
+          )}
           <SettingsRow
             label="Keep logs for"
             control={<Segmented label="Keep logs for" value={String(st.logDays)} onChange={(v) => set('storage', { logDays: Number(v) })} options={days(7, 30, 90)} />}
@@ -220,7 +228,11 @@ export function Settings() {
           />
           <SettingsRow
             label="Translucent window"
-            sub={env?.material === 'mica' ? 'Lets the desktop show through (Mica)' : 'Needs Windows 11'}
+            sub={
+              env?.material === 'mica'
+                ? 'Your wallpaper tints the window (Mica). Windows shows it while UWiper is the active window'
+                : 'Needs Windows 11'
+            }
             control={
               <Switch
                 checked={appearance.translucent}

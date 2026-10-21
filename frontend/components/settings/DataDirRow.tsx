@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { inTauri, pickFolder } from '../../lib/api';
 import { formatBytes } from '../../lib/format';
 import type { DataDir, DataDirKey } from '../../lib/types';
-import { Button, Field, Pill } from '../../ui';
+import { Button, Field, Pill, Skeleton } from '../../ui';
 import { Locked, SettingsRow } from './SettingsSection';
 
 const META: Record<DataDirKey, { label: string; sub: string }> = {
@@ -11,6 +11,15 @@ const META: Record<DataDirKey, { label: string; sub: string }> = {
   logs: { label: 'Logs', sub: 'What UWiper did and when' },
   temp: { label: 'Temporary files', sub: 'Emptied every time UWiper closes' },
 };
+
+/** Stands in for the data folder rows until their sizes are known. */
+export function DataDirPlaceholders() {
+  return (Object.keys(META) as DataDirKey[]).map((key) => (
+    <SettingsRow key={key} label={META[key].label} sub={META[key].sub} control={<Skeleton className="w-24" />}>
+      <Skeleton className="h-2.5 w-2/5" />
+    </SettingsRow>
+  ));
+}
 
 /** A data folder with its size, and an inline editor when custom locations are on. */
 export function DataDirRow({ dir, editable, onSave }: { dir: DataDir; editable: boolean; onSave: (path: string | null) => void }) {

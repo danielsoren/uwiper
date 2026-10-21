@@ -1,4 +1,4 @@
-import { IconTile, Spinner, type IconName, type TileTone } from '../../ui';
+import { IconTile, Skeleton, type IconName, type TileTone } from '../../ui';
 
 /** A clickable summary tile on the Overview page. */
 export function StatCard({
@@ -26,7 +26,7 @@ export function StatCard({
     >
       <IconTile icon={icon} tone={tone} />
       <span className="mt-0.5 text-stat font-bold leading-none tracking-[-0.02em]">
-        {value ?? (loading ? <Spinner size={20} /> : '–')}
+        {value ?? (loading ? <Skeleton className="my-px h-6 w-12" /> : '–')}
       </span>
       <span className="font-medium">{label}</span>
       <span className="-mt-1.5 text-[11.5px] text-fg-4">{sub}</span>

@@ -1,6 +1,7 @@
 mod apps;
 mod cleanup;
 mod error;
+mod icons;
 mod paths;
 mod services;
 mod settings;
@@ -32,7 +33,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             apps::list_apps,
-            apps::folder_size,
             cleanup::scan_cleanup,
             startup::list_startup,
             services::list_services,

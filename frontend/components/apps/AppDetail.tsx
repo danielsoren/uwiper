@@ -4,21 +4,28 @@ import { cn } from '../../lib/cn';
 import { formatBytes, formatDate } from '../../lib/format';
 import type { InstalledApp } from '../../lib/types';
 import { useAppStore } from '../../store/useAppStore';
-import { Button, Note, Spinner } from '../../ui';
+import { Button, Note } from '../../ui';
 import { AppTile } from './AppTile';
 
-export type Measure = number | 'loading' | 'error';
-
-function Fact({ label, children, wide, mono }: { label: string; children: ReactNode; wide?: boolean; mono?: boolean }) {
+function Fact({ label, hint, children, wide, mono }: { label: string; hint?: string | null; children: ReactNode; wide?: boolean; mono?: boolean }) {
   return (
     <div className={cn(wide && 'col-span-full')}>
       <dt className="text-micro text-fg-4">{label}</dt>
       <dd className={cn('mt-0.5', mono ? 'select-text break-all font-mono text-small text-fg-path' : 'text-body font-medium')}>{children}</dd>
+      {hint && <dd className="mt-0.5 text-micro text-fg-4">{hint}</dd>}
     </div>
   );
 }
 
-export function AppDetail({ app, measure }: { app: InstalledApp; measure: Measure | undefined }) {
+/** Where the size figure comes from, when it's worth saying. */
+function sizeSource(app: InstalledApp): string | null {
+  const { folderBytes: folder, reportedBytes: reported } = app;
+  if (folder === null) return reported === null ? null : 'reported by the installer';
+  if (reported === null || folder >= reported) return 'measured on disk';
+  return `the installer's figure – the folder itself has ${formatBytes(folder)}`;
+}
+
+export function AppDetail({ app }: { app: InstalledApp }) {
   const attempt = useAppStore((s) => s.attempt);
   const notify = useAppStore((s) => s.notify);
   const [copied, setCopied] = useState(false);
@@ -38,7 +45,7 @@ export function AppDetail({ app, measure }: { app: InstalledApp; measure: Measur
   return (
     <div className="flex flex-col gap-[18px] px-[26px] pb-[26px] pt-5">
       <div className="flex items-center gap-3.5">
-        <AppTile name={app.name} large />
+        <AppTile name={app.name} icon={app.icon} large />
         <div className="min-w-0">
           <h2 className="select-text text-h2 font-bold tracking-[-0.01em]">{app.name}</h2>
           <div className="mt-[3px] text-meta text-fg-3">
@@ -49,18 +56,8 @@ export function AppDetail({ app, measure }: { app: InstalledApp; measure: Measur
       </div>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-white/7 bg-white/4 px-4 py-3.5">
-        <Fact label="Size on disk">
-          {measure === 'loading' ? (
-            <span className="inline-flex items-center gap-1.5 text-fg-3">
-              <Spinner size={13} /> Measuring…
-            </span>
-          ) : typeof measure === 'number' ? (
-            formatBytes(measure)
-          ) : (
-            <>
-              {formatBytes(app.sizeBytes)} <span className="text-small font-normal text-fg-3">reported</span>
-            </>
-          )}
+        <Fact label="Size on disk" hint={sizeSource(app)}>
+          {formatBytes(app.sizeBytes)}
         </Fact>
         <Fact label="Installed">{formatDate(app.installDate)}</Fact>
         <Fact label="Installer">{app.source === 'msi' ? 'Windows Installer (MSI)' : 'Classic installer'}</Fact>

@@ -22,7 +22,6 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
 export const api = {
   environment: () => call<Environment>('environment'),
   listApps: () => call<InstalledApp[]>('list_apps'),
-  folderSize: (path: string) => call<number>('folder_size', { path }),
   scanCleanup: () => call<CleanupItem[]>('scan_cleanup'),
   listStartup: () => call<StartupItem[]>('list_startup'),
   listServices: () => call<ServiceItem[]>('list_services'),

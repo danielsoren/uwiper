@@ -46,6 +46,7 @@ struct Def {
 const BROWSER_NOTE: &str = "Cookies, passwords and history are never touched";
 const REDOWNLOAD: &str = "Downloaded again the next time it's needed";
 
+#[rustfmt::skip]
 const DEFS: &[Def] = &[
     Def { id: "temp", group: "windows", name: "Temporary files", description: "%TEMP% and Windows\\Temp", default_on: true,
         specs: &[Spec::Dir("%TEMP%"), Spec::Dir(r"%SystemRoot%\Temp")] },
@@ -211,7 +212,10 @@ mod tests {
             name: "Test",
             description: "",
             default_on: true,
-            specs: &[Spec::Chromium("%UWIPER_CLEANUP_TEST%"), Spec::Dir("%UWIPER_CLEANUP_TEST%/missing")],
+            specs: &[
+                Spec::Chromium("%UWIPER_CLEANUP_TEST%"),
+                Spec::Dir("%UWIPER_CLEANUP_TEST%/missing"),
+            ],
         };
         let item = measure(&def).unwrap();
         assert_eq!(item.size_bytes, 150);

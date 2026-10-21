@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { cn } from '../lib/cn';
 import { Icon, type IconName } from './Icon';
+import { Spinner } from './Spinner';
 
 export type ButtonKind = 'primary' | 'secondary' | 'danger' | 'ghost';
 
@@ -18,28 +19,32 @@ interface Props {
   children?: ReactNode;
   onClick?: () => void;
   disabled?: boolean;
+  /** Shows a spinner in place of the icon and blocks clicks. */
+  busy?: boolean;
   small?: boolean;
   title?: string;
   ariaLabel?: string;
   className?: string;
 }
 
-export function Button({ kind = 'secondary', icon, children, onClick, disabled, small, title, ariaLabel, className }: Props) {
+export function Button({ kind = 'secondary', icon, children, onClick, disabled, busy, small, title, ariaLabel, className }: Props) {
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={disabled}
+      disabled={disabled || busy}
+      aria-busy={busy || undefined}
       title={title}
       aria-label={ariaLabel}
       className={cn(
-        'inline-flex items-center justify-center gap-2 whitespace-nowrap border border-transparent font-medium disabled:opacity-45',
+        'inline-flex items-center justify-center gap-2 whitespace-nowrap border border-transparent font-medium',
+        busy ? 'cursor-progress' : 'disabled:opacity-45',
         small ? 'h-[30px] rounded-lg px-[11px] text-meta' : 'h-9 rounded-control px-3.5 text-body',
         KIND[kind],
         className,
       )}
     >
-      {icon && <Icon name={icon} size={small ? 14 : 16} stroke={1.9} />}
+      {busy ? <Spinner size={small ? 13 : 15} /> : icon && <Icon name={icon} size={small ? 14 : 16} stroke={1.9} />}
       {children}
     </button>
   );

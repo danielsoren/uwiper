@@ -88,7 +88,7 @@ export function Sidebar() {
         <Logo color={settings?.appearance.accent ?? '#0071E3'} />
         <div data-tauri-drag-region>
           <div className="text-title font-bold tracking-[-0.01em]">UWiper</div>
-          <div className="text-micro text-fg-4">Ultimate Wiper</div>
+          <div className="text-micro text-fg-4">Ultimate system cleaner</div>
         </div>
       </div>
 

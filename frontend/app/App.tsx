@@ -1,5 +1,6 @@
 import { useEffect, type ComponentType } from 'react';
 import { Sidebar } from '../components/layout/Sidebar';
+import { Splash } from '../components/layout/Splash';
 import { Toasts } from '../components/layout/Toasts';
 import { CaptionButtons } from '../components/layout/WindowControls';
 import { Apps } from '../pages/Apps';
@@ -24,6 +25,7 @@ const PAGES: Record<Page, ComponentType> = {
 
 export function App() {
   const page = useAppStore((s) => s.page);
+  const ready = useAppStore((s) => s.ready);
   const init = useAppStore((s) => s.init);
   const macButtons = useAppStore((s) => s.settings?.appearance.windowButtons === 'macos');
   useEffect(init, [init]);
@@ -33,10 +35,18 @@ export function App() {
   return (
     <div className="relative flex h-full">
       {!macButtons && <CaptionButtons />}
-      <Sidebar />
-      <main className="flex min-w-0 flex-1 flex-col bg-main">
-        <Current />
-      </main>
+      {ready ? (
+        <div className="fade-in flex min-w-0 flex-1">
+          <Sidebar />
+          <main className="flex min-w-0 flex-1 flex-col bg-main">
+            {/* Title-bar strip: room for the caption buttons and a place to drag the window. */}
+            <div className="h-8 flex-none" data-tauri-drag-region />
+            <Current />
+          </main>
+        </div>
+      ) : (
+        <Splash />
+      )}
       <Toasts />
     </div>
   );

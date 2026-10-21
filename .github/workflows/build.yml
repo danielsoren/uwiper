@@ -1,11 +1,18 @@
 name: Build
 
-# Every push and pull request builds and tests on Windows.
-# A release is published by pushing a tag like v0.1.0, or by running this
-# workflow by hand with "release" ticked (it tags the commit itself).
+# Runs only where it's needed, to keep Windows runner minutes low:
+# - pull requests into main (docs-only changes are skipped),
+# - pushing a tag like v0.2.0, which also publishes a release,
+# - by hand; with "release" ticked it tags the commit and publishes a release.
 on:
-  push:
   pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'assets/screenshots/**'
+      - 'LICENSE'
+  push:
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       release:
@@ -134,8 +141,12 @@ jobs:
           ' CHANGELOG.md > notes.md
           [ -s notes.md ] || echo "UWiper $TAG" > notes.md
 
+          # Versions like 0.2.0-beta.1 are published as pre-releases.
+          prerelease=()
+          [[ "$TAG" == *-* ]] && prerelease=(--prerelease)
+
           mv out/UWiper-portable.zip "out/UWiper-$TAG-portable.zip"
-          gh release create "$TAG" \
+          gh release create "$TAG" "${prerelease[@]}" \
             --target "$GITHUB_SHA" \
             --title "UWiper $TAG" \
             --notes-file notes.md \

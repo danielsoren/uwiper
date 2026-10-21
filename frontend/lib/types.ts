@@ -7,7 +7,12 @@ export interface InstalledApp {
   version: string | null;
   installLocation: string | null;
   installDate: string | null;
+  /** The measured folder or the installer's figure, whichever is larger. */
   sizeBytes: number | null;
+  reportedBytes: number | null;
+  folderBytes: number | null;
+  /** PNG data URL, when the app has an icon UWiper could read. */
+  icon: string | null;
   source: 'win32' | 'msi';
   scope: 'machine' | 'user';
   arch: 'x64' | 'x86' | null;

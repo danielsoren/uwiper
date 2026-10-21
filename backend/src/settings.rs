@@ -31,7 +31,14 @@ pub struct Storage {
 
 impl Default for Storage {
     fn default() -> Self {
-        Self { one_folder: true, quarantine: None, snapshots: None, logs: None, temp: None, log_days: 30 }
+        Self {
+            one_folder: true,
+            quarantine: None,
+            snapshots: None,
+            logs: None,
+            temp: None,
+            log_days: 30,
+        }
     }
 }
 
@@ -69,7 +76,11 @@ pub struct Scan {
 
 impl Default for Scan {
     fn default() -> Self {
-        Self { depth: "standard".into(), look_in: LookIn::default(), exclusions: Vec::new() }
+        Self {
+            depth: "standard".into(),
+            look_in: LookIn::default(),
+            exclusions: Vec::new(),
+        }
     }
 }
 
@@ -112,7 +123,11 @@ pub struct Appearance {
 
 impl Default for Appearance {
     fn default() -> Self {
-        Self { accent: "#0071E3".into(), window_buttons: "windows".into(), translucent: true }
+        Self {
+            accent: "#0071E3".into(),
+            window_buttons: "windows".into(),
+            translucent: true,
+        }
     }
 }
 
@@ -123,11 +138,17 @@ pub struct Footprint {
     pub start_with_windows: bool,
 }
 
+/// Reads settings.toml, writing the defaults on first launch so the file is
+/// there to inspect from the start.
 pub fn load() -> Settings {
-    std::fs::read_to_string(paths::settings_file())
-        .ok()
-        .and_then(|text| toml::from_str(&text).ok())
-        .unwrap_or_default()
+    match std::fs::read_to_string(paths::settings_file()) {
+        Ok(text) => toml::from_str(&text).unwrap_or_default(),
+        Err(_) => {
+            let defaults = Settings::default();
+            let _ = persist(&defaults);
+            defaults
+        }
+    }
 }
 
 fn persist(settings: &Settings) -> Result<()> {
@@ -142,12 +163,13 @@ fn persist(settings: &Settings) -> Result<()> {
     Ok(())
 }
 
-#[tauri::command]
+// `async` keeps these off the main thread so the window never stalls.
+#[tauri::command(async)]
 pub fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
     system::apply_footprint(&settings.footprint)?;
     persist(&settings)?;

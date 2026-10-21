@@ -18,7 +18,7 @@ pub struct Environment {
     version: &'static str,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn environment(state: State<'_, AppState>) -> Environment {
     Environment {
         elevated: is_elevated(),
@@ -70,7 +70,7 @@ pub fn is_elevated() -> bool {
 }
 
 /// Starts a new elevated copy of UWiper (UAC prompt) and closes this one.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restart_as_admin(app: AppHandle) -> Result<()> {
     #[cfg(windows)]
     {
@@ -106,7 +106,7 @@ pub fn restart_as_admin(app: AppHandle) -> Result<()> {
 }
 
 /// Opens a folder in Explorer.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_folder(path: String) -> Result<()> {
     if !std::path::Path::new(&path).is_dir() {
         return Err(Error::Other("This folder doesn't exist yet".into()));
@@ -121,7 +121,7 @@ pub fn open_folder(path: String) -> Result<()> {
 }
 
 /// Opens Explorer with the file selected.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reveal_path(path: String) -> Result<()> {
     if !std::path::Path::new(&path).exists() {
         return Err(Error::Other("This file or folder no longer exists".into()));

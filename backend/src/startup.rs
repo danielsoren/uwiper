@@ -110,7 +110,10 @@ mod imp {
                 continue;
             }
             let path = entry.path().to_string_lossy().into_owned();
-            let name = file.rsplit_once('.').map_or(file.as_str(), |(stem, _)| stem).to_string();
+            let name = file
+                .rsplit_once('.')
+                .map_or(file.as_str(), |(stem, _)| stem)
+                .to_string();
             out.push(StartupItem {
                 id: format!("{location}|{file}"),
                 enabled: approved(approved_root, "StartupFolder", &file),

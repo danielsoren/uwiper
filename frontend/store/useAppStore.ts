@@ -50,6 +50,8 @@ export interface Toast {
 
 interface AppState {
   page: Page;
+  /** False until the first data has loaded; the splash screen shows meanwhile. */
+  ready: boolean;
   env: Environment | null;
   settings: Settings | null;
   res: { [K in ResourceKey]: Resource<Resources[K]> };
@@ -68,11 +70,13 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>()((set, get) => {
+  let started = false;
   const patch = <K extends ResourceKey>(key: K, change: Partial<Resource<Resources[K]>>) =>
     set((s) => ({ res: { ...s.res, [key]: { ...s.res[key], ...change } } }));
 
   return {
     page: 'overview',
+    ready: false,
     env: null,
     settings: null,
     res: { apps: idle(), cleanup: idle(), startup: idle(), services: idle(), tasks: idle(), storage: idle() },
@@ -81,8 +85,13 @@ export const useAppStore = create<AppState>()((set, get) => {
     go: (page) => set({ page }),
 
     init: () => {
-      api.environment().then((env) => set({ env }), (e) => get().notify(errorText(e)));
-      api.getSettings().then((settings) => set({ settings }), (e) => get().notify(errorText(e)));
+      if (started) return;
+      started = true;
+      const env = api.environment().then((env) => set({ env }), (e) => get().notify(errorText(e)));
+      const settings = api.getSettings().then((settings) => set({ settings }), (e) => get().notify(errorText(e)));
+      // Settings shows these numbers, so measure them before the first screen.
+      get().load('storage');
+      Promise.all([env, settings]).then(() => set({ ready: true }));
     },
 
     load: (key, force = false) => {

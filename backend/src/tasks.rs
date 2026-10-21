@@ -38,7 +38,9 @@ fn scan() -> Result<Vec<TaskItem>> {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                denied |= e.io_error().is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
+                denied |= e
+                    .io_error()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
                 continue;
             }
         };
@@ -69,7 +71,13 @@ fn decode(bytes: &[u8]) -> Option<String> {
     let utf16 = |data: &[u8], le: bool| {
         let units: Vec<u16> = data
             .chunks_exact(2)
-            .map(|c| if le { u16::from_le_bytes([c[0], c[1]]) } else { u16::from_be_bytes([c[0], c[1]]) })
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
             .collect();
         String::from_utf16(&units).ok()
     };
@@ -125,7 +133,10 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
     }
 
     let name = rel.to_string_lossy().replace('/', "\\");
-    let folder = rel.parent().map(|p| p.to_string_lossy().replace('/', "\\")).unwrap_or_default();
+    let folder = rel
+        .parent()
+        .map(|p| p.to_string_lossy().replace('/', "\\"))
+        .unwrap_or_default();
     let binary = command.as_deref().and_then(resolve_executable);
     Some(TaskItem {
         is_windows: name.starts_with("Microsoft\\"),
@@ -134,7 +145,11 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
         command,
         arguments,
         enabled,
-        triggers: if triggers.is_empty() { "On demand".into() } else { triggers.join(", ") },
+        triggers: if triggers.is_empty() {
+            "On demand".into()
+        } else {
+            triggers.join(", ")
+        },
         folder,
         name,
     })
