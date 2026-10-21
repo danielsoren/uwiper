@@ -1,12 +1,14 @@
 //! Caches and temporary files that Windows and apps rebuild on their own.
-//! This version only measures them; nothing is deleted.
+//! Cleaning deletes them for good (no quarantine): apps simply rebuild them.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use tauri::State;
 
 use crate::error::{blocking, Result};
 use crate::util::{dir_size, expand_env};
+use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -181,6 +183,69 @@ fn measure(def: &Def) -> Option<CleanupItem> {
     })
 }
 
+#[derive(Serialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanReport {
+    freed_bytes: u64,
+    /// Files that were in use, typically by a running browser.
+    skipped_files: u64,
+}
+
+/// Deletes the contents of the chosen cache categories. Folders themselves
+/// stay, and files in use are skipped.
+#[tauri::command]
+pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Result<CleanReport> {
+    let settings = state.settings.lock().unwrap().clone();
+    blocking(move || {
+        let mut report = CleanReport::default();
+        let mut lines = vec!["Cleaned caches:".to_string()];
+        for def in DEFS.iter().filter(|d| ids.iter().any(|id| id == d.id)) {
+            let before = report.freed_bytes;
+            for path in def.specs.iter().flat_map(resolve) {
+                if path.is_dir() {
+                    empty_dir(&path, &mut report);
+                } else if let Ok(meta) = std::fs::metadata(&path) {
+                    remove_file(&path, meta.len(), &mut report);
+                }
+            }
+            lines.push(format!("  {} – {} bytes", def.name, report.freed_bytes - before));
+        }
+        log::write(&settings, &lines);
+        Ok(report)
+    })
+    .await
+}
+
+fn remove_file(path: &Path, len: u64, report: &mut CleanReport) {
+    match std::fs::remove_file(path) {
+        Ok(()) => report.freed_bytes += len,
+        Err(_) => report.skipped_files += 1,
+    }
+}
+
+fn empty_dir(dir: &Path, report: &mut CleanReport) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        // Links and junctions may lead anywhere: leave them alone.
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            empty_dir(&path, report);
+            // Succeeds only once it's empty.
+            let _ = std::fs::remove_dir(&path);
+        } else {
+            remove_file(&path, meta.len(), report);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn scan_cleanup() -> Result<Vec<CleanupItem>> {
     blocking(|| {
@@ -221,6 +286,21 @@ mod tests {
         assert_eq!(item.size_bytes, 150);
         assert_eq!(item.file_count, 2);
         assert_eq!(item.paths.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empties_folders_but_keeps_them() {
+        let dir = std::env::temp_dir().join(format!("uwiper-clean-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        std::fs::write(dir.join("a.bin"), [0u8; 10]).unwrap();
+        std::fs::write(dir.join("sub/deeper/b.bin"), [0u8; 5]).unwrap();
+        let mut report = CleanReport::default();
+        empty_dir(&dir, &mut report);
+        assert_eq!(report.freed_bytes, 15);
+        assert_eq!(report.skipped_files, 0);
+        assert!(dir.is_dir());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

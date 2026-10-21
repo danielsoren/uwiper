@@ -6,28 +6,30 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::{blocking, Error, Result};
+use crate::targets::Target;
 use crate::util::{expand_env, file_state, resolve_executable};
 
-#[derive(Serialize, Clone, Debug, Default)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskItem {
-    name: String,
+    pub(crate) name: String,
     folder: String,
     command: Option<String>,
     arguments: Option<String>,
-    binary: Option<String>,
+    pub(crate) binary: Option<String>,
     file_exists: Option<bool>,
     enabled: bool,
     triggers: String,
-    is_windows: bool,
+    pub(crate) is_windows: bool,
+    pub(crate) removal: Target,
 }
 
 #[tauri::command]
 pub async fn list_tasks() -> Result<Vec<TaskItem>> {
-    blocking(scan).await
+    blocking(list).await
 }
 
-fn scan() -> Result<Vec<TaskItem>> {
+pub fn list() -> Result<Vec<TaskItem>> {
     if !cfg!(windows) {
         return Err(Error::Unsupported);
     }
@@ -151,6 +153,9 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
             triggers.join(", ")
         },
         folder,
+        removal: Target::Task {
+            path: format!(r"\{name}"),
+        },
         name,
     })
 }

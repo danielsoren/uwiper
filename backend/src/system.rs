@@ -69,32 +69,38 @@ pub fn is_elevated() -> bool {
     false
 }
 
+/// Starts a program with administrator rights (UAC prompt).
+#[cfg(windows)]
+pub fn run_elevated(program: &std::ffi::OsStr, params: &str) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, program, params) = (wide("runas".as_ref()), wide(program), wide(params.as_ref()));
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            program.as_ptr(),
+            params.as_ptr(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean success; otherwise the UAC prompt was declined.
+    if result as isize <= 32 {
+        return Err(Error::Other("Administrator rights were not granted".into()));
+    }
+    Ok(())
+}
+
 /// Starts a new elevated copy of UWiper (UAC prompt) and closes this one.
 #[tauri::command(async)]
 pub fn restart_as_admin(app: AppHandle) -> Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        use windows_sys::Win32::UI::Shell::ShellExecuteW;
-        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-
-        let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
-        let exe = wide(std::env::current_exe()?.as_os_str());
-        let verb = wide(std::ffi::OsStr::new("runas"));
-        let result = unsafe {
-            ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                exe.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        // Values above 32 mean success; otherwise the UAC prompt was declined.
-        if result as isize <= 32 {
-            return Err(Error::Other("Administrator rights were not granted".into()));
-        }
+        run_elevated(std::env::current_exe()?.as_os_str(), "")?;
         app.exit(0);
         Ok(())
     }

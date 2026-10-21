@@ -2,12 +2,17 @@ mod apps;
 mod cleanup;
 mod error;
 mod icons;
+mod leftovers;
+mod log;
 mod paths;
+mod quarantine;
 mod services;
 mod settings;
 mod startup;
 mod system;
+mod targets;
 mod tasks;
+mod uninstall;
 mod util;
 
 use std::sync::Mutex;
@@ -24,8 +29,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let settings = settings::load();
+            // Housekeeping: old quarantine batches and logs go away in the background.
+            let for_cleanup = settings.clone();
+            std::thread::spawn(move || {
+                quarantine::purge_expired(&for_cleanup);
+                log::purge(&for_cleanup);
+            });
             app.manage(AppState {
-                settings: Mutex::new(settings::load()),
+                settings: Mutex::new(settings),
                 material: Mutex::new("none"),
             });
             create_main_window(app)?;
@@ -34,12 +46,21 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             apps::list_apps,
             cleanup::scan_cleanup,
+            cleanup::clean_caches,
             startup::list_startup,
             services::list_services,
             tasks::list_tasks,
             settings::get_settings,
             settings::save_settings,
             paths::storage_info,
+            leftovers::scan_leftovers,
+            uninstall::create_restore_point,
+            uninstall::start_uninstall,
+            uninstall::uninstall_finished,
+            quarantine::remove_items,
+            quarantine::list_quarantine,
+            quarantine::restore_batch,
+            quarantine::delete_batch,
             system::environment,
             system::restart_as_admin,
             system::open_folder,

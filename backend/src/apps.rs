@@ -14,11 +14,11 @@ use crate::util::{command_executable, dir_size, is_windows_path, parallel_map};
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledApp {
-    id: String,
-    name: String,
-    publisher: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) publisher: Option<String>,
     version: Option<String>,
-    install_location: Option<String>,
+    pub(crate) install_location: Option<String>,
     /// ISO date, e.g. "2026-03-12"
     install_date: Option<String>,
     /// The best estimate: the measured folder or what the installer
@@ -31,12 +31,12 @@ pub struct InstalledApp {
     /// The app's icon as a PNG data URL.
     icon: Option<String>,
     /// "win32" or "msi"
-    source: &'static str,
+    pub(crate) source: &'static str,
     /// "machine" or "user"
     scope: &'static str,
     arch: Option<&'static str>,
-    uninstall_string: Option<String>,
-    quiet_uninstall_string: Option<String>,
+    pub(crate) uninstall_string: Option<String>,
+    pub(crate) quiet_uninstall_string: Option<String>,
     registry_key: String,
     #[serde(skip)]
     display_icon: Option<String>,
@@ -52,6 +52,39 @@ pub async fn list_apps() -> Result<Vec<InstalledApp>> {
         Ok(apps)
     })
     .await
+}
+
+/// Installed apps as the registry lists them, without sizes or icons.
+pub fn list_plain() -> Result<Vec<InstalledApp>> {
+    imp::list()
+}
+
+pub fn find(id: &str) -> Result<Option<InstalledApp>> {
+    Ok(imp::list()?.into_iter().find(|a| a.id == id))
+}
+
+const UNINSTALL_KEY: &str = r"Microsoft\Windows\CurrentVersion\Uninstall";
+
+/// The real registry path of an app's uninstall entry, from its id
+/// (`hive|view|key`). 32-bit entries live under WOW6432Node.
+pub fn uninstall_key_path(id: &str) -> Option<String> {
+    let mut parts = id.splitn(3, '|');
+    let (hive, view, key) = (parts.next()?, parts.next()?, parts.next()?);
+    let software = match (hive, view) {
+        ("HKCU", _) => "Software",
+        // KEY_WOW64_32KEY
+        ("HKLM", "512") => r"SOFTWARE\WOW6432Node",
+        ("HKLM", _) => "SOFTWARE",
+        _ => return None,
+    };
+    (!key.is_empty()).then(|| format!(r"{hive}\{software}\{UNINSTALL_KEY}\{key}"))
+}
+
+/// MSI apps are removed through msiexec with their product code, which is
+/// also the name of their uninstall key.
+pub fn msi_product_code(app: &InstalledApp) -> Option<&str> {
+    let key = app.id.splitn(3, '|').nth(2)?;
+    (app.source == "msi" && key.starts_with('{') && key.ends_with('}') && key.len() == 38).then_some(key)
 }
 
 fn measure_and_find_icons(apps: &mut [InstalledApp]) {
@@ -353,6 +386,23 @@ mod tests {
             Some(PathBuf::from(r"C:\App\obs64.exe"))
         );
         assert_eq!(pick_main_exe(exes(&["a.exe", "b.exe"]), "Something"), None);
+    }
+
+    #[test]
+    fn finds_uninstall_keys_from_ids() {
+        assert_eq!(
+            uninstall_key_path("HKLM|512|{ABC}").as_deref(),
+            Some(r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{ABC}")
+        );
+        assert_eq!(
+            uninstall_key_path("HKLM|256|7-Zip").as_deref(),
+            Some(r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\7-Zip")
+        );
+        assert_eq!(
+            uninstall_key_path("HKCU|0|Discord").as_deref(),
+            Some(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Discord")
+        );
+        assert_eq!(uninstall_key_path("bogus"), None);
     }
 
     #[test]

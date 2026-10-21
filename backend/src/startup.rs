@@ -5,23 +5,31 @@
 use serde::Serialize;
 
 use crate::error::{blocking, Result};
+use crate::targets::Target;
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct StartupItem {
     id: String,
-    name: String,
+    pub(crate) name: String,
     command: String,
     location: String,
-    target: Option<String>,
+    /// The program it starts.
+    pub(crate) target: Option<String>,
     file_exists: Option<bool>,
     enabled: bool,
-    is_windows: bool,
+    pub(crate) is_windows: bool,
+    /// What to remove to take it out of startup.
+    pub(crate) removal: Target,
 }
 
 #[tauri::command]
 pub async fn list_startup() -> Result<Vec<StartupItem>> {
-    blocking(imp::list).await
+    blocking(list).await
+}
+
+pub fn list() -> Result<Vec<StartupItem>> {
+    imp::list()
 }
 
 #[cfg(not(windows))]
@@ -48,9 +56,24 @@ mod imp {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         let mut out = Vec::new();
-        run_key(&mut out, &hkcu, 0, "Run", r"HKCU\…\Run");
-        run_key(&mut out, &hklm, KEY_WOW64_64KEY, "Run", r"HKLM\…\Run");
-        run_key(&mut out, &hklm, KEY_WOW64_32KEY, "Run32", r"HKLM\…\Run (32-bit)");
+        run_key(&mut out, &hkcu, 0, "Run", r"HKCU\…\Run", &format!(r"HKCU\{RUN}"));
+        run_key(
+            &mut out,
+            &hklm,
+            KEY_WOW64_64KEY,
+            "Run",
+            r"HKLM\…\Run",
+            &format!(r"HKLM\{RUN}"),
+        );
+        let run32 = format!(r"HKLM\{}", RUN.replacen("Software", r"SOFTWARE\WOW6432Node", 1));
+        run_key(
+            &mut out,
+            &hklm,
+            KEY_WOW64_32KEY,
+            "Run32",
+            r"HKLM\…\Run (32-bit)",
+            &run32,
+        );
         folder(
             &mut out,
             &expand_env(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"),
@@ -75,7 +98,14 @@ mod imp {
             .unwrap_or(true)
     }
 
-    fn run_key(out: &mut Vec<StartupItem>, root: &RegKey, view: u32, approved_sub: &str, location: &str) {
+    fn run_key(
+        out: &mut Vec<StartupItem>,
+        root: &RegKey,
+        view: u32,
+        approved_sub: &str,
+        location: &str,
+        key_path: &str,
+    ) {
         let Ok(key) = root.open_subkey_with_flags(RUN, KEY_READ | view) else {
             return;
         };
@@ -93,6 +123,10 @@ mod imp {
                 is_windows: target.as_deref().is_some_and(is_windows_path),
                 file_exists: target.as_deref().and_then(file_state),
                 target,
+                removal: Target::RegistryValue {
+                    key: key_path.to_string(),
+                    name: name.clone(),
+                },
                 name,
                 command,
                 location: location.to_string(),
@@ -120,6 +154,7 @@ mod imp {
                 name,
                 command: path.clone(),
                 location: location.to_string(),
+                removal: Target::Path { path: path.clone() },
                 target: Some(path),
                 file_exists: Some(true),
                 is_windows: false,
