@@ -1,112 +1,88 @@
-import { useEffect, useState } from 'react';
-import { Icon } from '../components/Icon';
-import { PageHeader } from '../components/PageHeader';
-import { Button, Card, ErrorBox, Loading, Note, Spinner } from '../components/ui';
+import { useState } from 'react';
+import { CacheBreakdown } from '../components/cleanup/CacheBreakdown';
+import { cleanupGroupsOf } from '../components/cleanup/groups';
+import { PageBody, PageHeader } from '../components/layout/Page';
 import { api } from '../lib/api';
+import { CLEANUP_GROUPS } from '../lib/cleanupGroups';
+import { cn } from '../lib/cn';
 import { formatBytes, plural } from '../lib/format';
-import type { CleanupGroup } from '../lib/types';
-import { useStore } from '../state/store';
-import { GROUP_META } from './Overview';
-
-const ORDER: CleanupGroup[] = ['windows', 'browsers', 'apps', 'developer'];
+import { useResource } from '../store/hooks';
+import { useAppStore } from '../store/useAppStore';
+import { Button, Callout, Card, Icon, ListCard, ListRow, Loading, Note, Spinner, Tag } from '../ui';
 
 export function Cleanup() {
-  const { cleanup, attempt } = useStore();
+  const attempt = useAppStore((s) => s.attempt);
+  const cleanup = useResource('cleanup');
   const [open, setOpen] = useState<Record<string, boolean>>({});
-
-  useEffect(() => cleanup.load(), [cleanup.load]);
 
   const items = cleanup.data ?? [];
   const total = items.reduce((s, i) => s + i.sizeBytes, 0);
   const safe = items.filter((i) => i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
-  const groups = ORDER.map((g) => ({ group: g, items: items.filter((i) => i.group === g).sort((a, b) => b.sizeBytes - a.sizeBytes) })).filter(
-    (g) => g.items.length > 0,
-  );
+  const [value, unit] = formatBytes(safe).split(' ');
 
   return (
     <>
       <PageHeader title="Cleanup" subtitle="Caches, temporary files and logs that Windows and your apps rebuild on their own">
-        <Button icon="refresh" onClick={() => cleanup.load(true)} disabled={cleanup.loading}>
+        <Button icon="refresh" onClick={cleanup.reload} disabled={cleanup.loading}>
           Scan again
         </Button>
         <Button kind="primary" icon="sparkle" disabled title="Arrives in v0.2">
           Clean {formatBytes(safe)}
         </Button>
       </PageHeader>
-      <div className="page-body">
-        {cleanup.error && <ErrorBox message={cleanup.error} onRetry={() => cleanup.load(true)} />}
+      <PageBody>
+        {cleanup.error && <Callout message={cleanup.error} action="Try again" onAction={cleanup.reload} />}
         {!cleanup.data && cleanup.loading && <Loading label="Measuring caches – big ones can take a moment…" />}
 
         {cleanup.data && (
           <>
-            <Card className="hero">
-              <div className="hero-main">
-                <h2 className="eyebrow">Safe to clean</h2>
-                <div className="hero-value">
-                  {formatBytes(safe).split(' ')[0]} <span>{formatBytes(safe).split(' ')[1]}</span>
+            <Card className="flex flex-wrap items-center gap-7 px-7 py-[26px]">
+              <div className="min-w-0 flex-[1_1_280px]">
+                <h2 className="text-small font-semibold uppercase tracking-[.06em] text-fg-3">Safe to clean</h2>
+                <div className="mt-2 text-hero font-bold leading-none tracking-[-0.035em]">
+                  {value} <span className="text-[28px] font-semibold tracking-[-0.01em] text-fg-3">{unit}</span>
                 </div>
-                <p className="hero-text">
+                <p className="mt-3 max-w-[420px] text-body leading-normal text-[#b4b4bb]">
                   of {formatBytes(total)} found. Developer caches and anything you might want to keep stay off by default.
                 </p>
               </div>
-              <div className="hero-side">
-                <div className="stack-bar" role="img" aria-label="Found, by group">
-                  {groups.map((g) => (
-                    <span
-                      key={g.group}
-                      style={{ flexGrow: g.items.reduce((s, i) => s + i.sizeBytes, 0) || 1, background: GROUP_META[g.group].color }}
-                    />
-                  ))}
-                </div>
-                <div className="legend legend-inline">
-                  {groups.map((g) => (
-                    <span key={g.group} className="legend-chip">
-                      <span className="legend-dot" style={{ background: GROUP_META[g.group].color }} />
-                      {GROUP_META[g.group].label}
-                      <span className="muted-text">{formatBytes(g.items.reduce((s, i) => s + i.sizeBytes, 0))}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
+              <CacheBreakdown items={items} inline />
             </Card>
 
             <Note>
-              This version measures only. Cleaning arrives in v0.2 – caches will be deleted for good since apps rebuild
-              them, and cookies, passwords, history and offline downloads are never touched.
+              This version measures only. Cleaning arrives in v0.2 – caches will be deleted for good since apps rebuild them, and
+              cookies, passwords, history and offline downloads are never touched.
             </Note>
 
-            {groups.map((g) => (
-              <section key={g.group} className="card list-card">
-                <div className="list-head">
-                  <span className="item-icon" style={{ color: GROUP_META[g.group].color }}>
-                    <Icon name={GROUP_META[g.group].icon} />
-                  </span>
-                  <h2>{GROUP_META[g.group].label}</h2>
-                  <span className="muted-text">{formatBytes(g.items.reduce((s, i) => s + i.sizeBytes, 0))}</span>
+            {cleanupGroupsOf(items).map((g) => (
+              <ListCard key={g.group}>
+                <div className="flex min-h-14 items-center gap-3 px-4 py-2.5">
+                  <Icon name={CLEANUP_GROUPS[g.group].icon} style={{ color: CLEANUP_GROUPS[g.group].color }} />
+                  <h2 className="flex-1 text-[14.5px] font-semibold">{CLEANUP_GROUPS[g.group].label}</h2>
                   {cleanup.loading && <Spinner size={14} />}
+                  <span className="text-small text-fg-3">{formatBytes(g.bytes)}</span>
                 </div>
                 {g.items.map((i) => (
-                  <div key={i.id} className="cleanup-item">
-                    <button
-                      type="button"
-                      className="item-row clickable"
-                      aria-expanded={!!open[i.id]}
+                  <div key={i.id}>
+                    <ListRow
+                      title={i.name}
+                      subtitle={`${i.description} · ${plural(i.fileCount, 'file', 'files')}`}
+                      expanded={!!open[i.id]}
                       onClick={() => setOpen((o) => ({ ...o, [i.id]: !o[i.id] }))}
                     >
-                      <span className="item-text">
-                        <span className="item-name">{i.name}</span>
-                        <span className="item-sub">
-                          {i.description} · {plural(i.fileCount, 'file', 'files')}
-                        </span>
-                      </span>
-                      {!i.defaultOn && <span className="app-badge">Optional</span>}
-                      <span className="item-size">{formatBytes(i.sizeBytes)}</span>
-                      <Icon name="chevron" size={14} className={`muted chevron${open[i.id] ? ' open' : ''}`} />
-                    </button>
+                      {!i.defaultOn && <Tag>Optional</Tag>}
+                      <span className="font-medium tabular-nums">{formatBytes(i.sizeBytes)}</span>
+                      <Icon name="chevron" size={14} className={cn('text-fg-4 transition-transform', open[i.id] && 'rotate-90')} />
+                    </ListRow>
                     {open[i.id] && (
-                      <div className="paths">
+                      <div className="flex flex-col items-start gap-0.5 px-4 pb-3">
                         {i.paths.map((p) => (
-                          <button type="button" key={p} className="path-link mono" onClick={() => attempt(() => api.revealPath(p))}>
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => attempt(() => api.revealPath(p))}
+                            className="break-all rounded-md px-1.5 py-[3px] text-left font-mono text-small text-fg-3 hover:bg-hover hover:text-accent-soft"
+                          >
                             {p}
                           </button>
                         ))}
@@ -114,11 +90,11 @@ export function Cleanup() {
                     )}
                   </div>
                 ))}
-              </section>
+              </ListCard>
             ))}
           </>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

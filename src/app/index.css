@@ -1,0 +1,113 @@
+@import 'tailwindcss';
+
+/* Design tokens. Runtime values (accent, window material) are plain CSS
+   variables on :root; `@theme inline` makes Tailwind utilities read them. */
+
+:root {
+  --accent: #0071e3;
+  --accent-soft: rgb(102, 170, 238);
+  --accent-tile: rgba(0, 113, 227, 0.2);
+
+  --surface-window: #1c1c1f;
+  --surface-sidebar: #232327;
+  --surface-main: #19191b;
+  color-scheme: dark;
+}
+
+/* Mica (Windows 11): let the desktop tint show through. */
+:root[data-material='mica'] {
+  --surface-window: transparent;
+  --surface-sidebar: rgba(255, 255, 255, 0.025);
+  --surface-main: rgba(18, 18, 20, 0.55);
+}
+
+@theme inline {
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-tile: var(--accent-tile);
+
+  --color-window: var(--surface-window);
+  --color-sidebar: var(--surface-sidebar);
+  --color-main: var(--surface-main);
+}
+
+@theme {
+  --font-sans: 'Inter Variable', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, Consolas, monospace;
+
+  /* Text, from primary to faint */
+  --color-fg: #ececee;
+  --color-fg-2: #c9c9cf;
+  --color-fg-3: #9c9ca3;
+  --color-fg-4: #8e8e95;
+  --color-fg-path: #dcdce1;
+
+  /* Hairlines and translucent fills on dark surfaces */
+  --color-line: rgba(255, 255, 255, 0.06);
+  --color-line-2: rgba(255, 255, 255, 0.08);
+  --color-fill: rgba(255, 255, 255, 0.045);
+  --color-fill-2: rgba(255, 255, 255, 0.07);
+  --color-hover: rgba(255, 255, 255, 0.06);
+
+  /* Status */
+  --color-good: #30d158;
+  --color-good-fg: #4cd964;
+  --color-warn: #ff9f0a;
+  --color-warn-fg: #ffb340;
+  --color-bad: #ff453a;
+  --color-bad-fg: #ff7b72;
+  --color-danger: #d70015;
+  --color-purple-fg: #d08cf7;
+  --color-focus: #5aa9ff;
+
+  /* Type scale (13px body, like macOS) */
+  --text-micro: 11px;
+  --text-small: 12px;
+  --text-meta: 12.5px;
+  --text-body: 13px;
+  --text-label: 13.5px;
+  --text-title: 15px;
+  --text-h2: 19px;
+  --text-h1: 22px;
+  --text-stat: 26px;
+  --text-hero: 56px;
+
+  --radius-control: 9px;
+  --radius-tile: 10px;
+  --radius-card: 14px;
+}
+
+@utility scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--color-window);
+    color: var(--color-fg);
+    font: 13px/1.4 var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    user-select: none;
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+  }
+
+  input::placeholder {
+    color: var(--color-fg-4);
+  }
+}

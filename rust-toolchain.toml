@@ -1,0 +1,4 @@
+# Pinned so new Clippy lints don't break CI on their own. Bump on purpose.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

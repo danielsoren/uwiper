@@ -9,20 +9,26 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   windows:
     name: Windows build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Same version as rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.0
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
@@ -38,16 +44,34 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      # Each Rust step keeps its output in a log so a failure can be shown
+      # as annotations (readable through the API without downloading logs).
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets --message-format=short -- -D warnings 2>&1 | tee ../ci-clippy.log
 
       - name: Unit tests
         working-directory: src-tauri
-        run: cargo test
+        run: |
+          set -o pipefail
+          cargo test 2>&1 | tee ../ci-test.log
 
       - name: Build app
-        run: npx tauri build --no-bundle
+        run: |
+          set -o pipefail
+          npx tauri build --no-bundle 2>&1 | tee ci-build.log
+
+      - name: Report failure
+        if: failure()
+        run: |
+          for log in ci-*.log; do
+            [ -f "$log" ] || continue
+            lines=$(grep -E "^(error|warning)|error\[|panicked|FAILED" "$log" | head -n 10)
+            [ -n "$lines" ] || lines=$(tail -n 10 "$log")
+            while IFS= read -r line; do echo "::error title=$log::$line"; done <<< "$lines"
+          done
 
       - name: Package portable zip
         shell: pwsh

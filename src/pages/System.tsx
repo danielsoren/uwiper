@@ -1,10 +1,25 @@
-import { useEffect, useState } from 'react';
-import { Icon, type IconName } from '../components/Icon';
-import { PageHeader } from '../components/PageHeader';
-import { Button, Empty, ErrorBox, Loading, Note, Pill, Segmented, Switch, type PillTone } from '../components/ui';
+import { useState } from 'react';
+import { PageBody, PageHeader, Toolbar } from '../components/layout/Page';
 import { api } from '../lib/api';
 import type { ServiceItem } from '../lib/types';
-import { useStore } from '../state/store';
+import { useResource } from '../store/hooks';
+import { useAppStore } from '../store/useAppStore';
+import {
+  Button,
+  Callout,
+  Empty,
+  IconTile,
+  ListCard,
+  ListRow,
+  Loading,
+  Note,
+  Pill,
+  SegmentCount,
+  Segmented,
+  Switch,
+  type IconName,
+  type PillTone,
+} from '../ui';
 
 type Tab = 'startup' | 'services' | 'tasks' | 'drivers';
 
@@ -27,29 +42,23 @@ const START: Record<ServiceItem['startType'], string> = {
   disabled: 'Disabled',
 };
 
-const HINT: Record<Tab, string> = {
+const HINT: Record<Exclude<Tab, 'drivers'>, string> = {
   startup: 'Programs that start when you sign in, from the Run keys and Startup folders. Enabled/disabled is the same switch Task Manager uses.',
   services: 'Services registered on this PC. “File missing” means the service belongs to an app that is already gone.',
   tasks: 'Scheduled tasks. Tasks that run a missing file are leftovers from removed apps.',
-  drivers: '',
 };
 
 const ICON: Record<Tab, IconName> = { startup: 'power', services: 'cog', tasks: 'calendar', drivers: 'cpu' };
 
 export function System() {
-  const store = useStore();
-  const { startup, services, tasks, attempt } = store;
+  const attempt = useAppStore((s) => s.attempt);
+  const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
+  const startup = useResource('startup');
+  const services = useResource('services');
+  const tasks = useResource('tasks');
   const [tab, setTab] = useState<Tab>('startup');
   const [hideWindows, setHideWindows] = useState(true);
   const [problemsOnly, setProblemsOnly] = useState(false);
-
-  useEffect(() => {
-    startup.load();
-    services.load();
-    tasks.load();
-  }, [startup.load, services.load, tasks.load]);
-
-  const resource = tab === 'startup' ? startup : tab === 'services' ? services : tab === 'tasks' ? tasks : null;
 
   const rows: Row[] =
     tab === 'startup'
@@ -91,94 +100,81 @@ export function System() {
     .filter((r) => !(hideWindows && r.windows) && (!problemsOnly || r.problem))
     .sort((a, b) => Number(b.problem) - Number(a.problem));
 
-  const countOf = (list: { isWindows: boolean }[] | null) =>
-    list ? String(list.filter((i) => !(hideWindows && i.isWindows)).length) : '…';
-  const tabLabel = (label: string, n: string) => (
-    <>
-      {label} <span className="seg-count">{n}</span>
-    </>
-  );
+  const countOf = (list: { isWindows: boolean }[] | null) => (list ? list.filter((i) => !(hideWindows && i.isWindows)).length : '…');
+  const resource = tab === 'startup' ? startup : tab === 'services' ? services : tab === 'tasks' ? tasks : null;
 
   return (
     <>
       <PageHeader title="System" subtitle="Everything that runs without asking: startup items, services, scheduled tasks and drivers" />
-      <div className="toolbar">
+      <Toolbar>
         <Segmented<Tab>
           label="System areas"
           value={tab}
           onChange={setTab}
           options={[
-            { value: 'startup', label: tabLabel('Startup', countOf(startup.data)) },
-            { value: 'services', label: tabLabel('Services', countOf(services.data)) },
-            { value: 'tasks', label: tabLabel('Scheduled tasks', countOf(tasks.data)) },
+            { value: 'startup', label: <>Startup <SegmentCount>{countOf(startup.data)}</SegmentCount></> },
+            { value: 'services', label: <>Services <SegmentCount>{countOf(services.data)}</SegmentCount></> },
+            { value: 'tasks', label: <>Scheduled tasks <SegmentCount>{countOf(tasks.data)}</SegmentCount></> },
             { value: 'drivers', label: 'Drivers' },
           ]}
         />
         <div className="flex-1" />
-        <label className="inline-switch">
+        <label className="inline-flex items-center gap-2 text-meta text-fg-2">
           Hide Windows items
           <Switch small checked={hideWindows} onChange={setHideWindows} label="Hide Windows items" />
         </label>
-        <label className="inline-switch">
+        <label className="inline-flex items-center gap-2 text-meta text-fg-2">
           Problems only
           <Switch small checked={problemsOnly} onChange={setProblemsOnly} label="Problems only" />
         </label>
-      </div>
+      </Toolbar>
 
-      <div className="page-body">
-        {tab === 'drivers' ? (
+      <PageBody>
+        {tab === 'drivers' || !resource ? (
           <Empty icon="cpu" title="Driver packages arrive in v0.2">
-            UWiper will list the third-party driver packages in the Driver Store and show which ones no device uses
-            anymore – old GPU drivers alone can take gigabytes.
+            UWiper will list the third-party driver packages in the Driver Store and show which ones no device uses anymore – old
+            GPU drivers alone can take gigabytes.
           </Empty>
         ) : (
           <>
-            <Note>{HINT[tab]} Read-only in this version.</Note>
-            {resource?.error && (
-              <ErrorBox
+            <Note>{HINT[tab as Exclude<Tab, 'drivers'>]} Read-only in this version.</Note>
+            {resource.error && (
+              <Callout
                 message={resource.error}
-                {...(resource.error.includes('administrator')
-                  ? { onRetry: store.restartAsAdmin, retryLabel: 'Restart as administrator' }
-                  : { onRetry: () => resource.load(true) })}
+                action={resource.error.includes('administrator') ? 'Restart as administrator' : 'Try again'}
+                onAction={resource.error.includes('administrator') ? restartAsAdmin : resource.reload}
               />
             )}
-            {resource?.loading && !resource.data && <Loading label="Reading…" />}
-            {resource?.data && visible.length === 0 && (
+            {resource.loading && !resource.data && <Loading label="Reading…" />}
+            {resource.data && visible.length === 0 && (
               <Empty icon="check" title={problemsOnly ? 'No problems here' : 'Nothing to show'}>
                 {hideWindows && !problemsOnly ? 'Windows items are hidden.' : undefined}
               </Empty>
             )}
             {visible.length > 0 && (
-              <div className="list-card card">
+              <ListCard>
                 {visible.map((r) => (
-                  <div key={r.key} className={`item-row${r.problem ? ' problem' : ''}`}>
-                    <span className={`item-icon ${r.problem ? 'tone-orange' : 'tone-accent'}`}>
-                      <Icon name={ICON[tab]} size={17} />
-                    </span>
-                    <span className="item-text">
-                      <span className="item-name">{r.name}</span>
-                      <span className="item-sub">{r.sub}</span>
-                    </span>
-                    <span className="mono item-path-col" title={r.path ?? undefined}>
+                  <ListRow
+                    key={r.key}
+                    tone={r.problem ? 'problem' : undefined}
+                    leading={<IconTile icon={ICON[tab]} tone={r.problem ? 'orange' : 'accent'} small />}
+                    title={r.name}
+                    subtitle={r.sub}
+                  >
+                    <span title={r.path ?? undefined} className="min-w-0 flex-[1_1_220px] truncate font-mono text-[11.5px] text-fg-3">
                       {r.path}
                     </span>
                     <Pill tone={r.tone}>{r.pill}</Pill>
                     {r.path && !r.problem && r.path.includes('\\') && (
-                      <Button
-                        small
-                        kind="ghost"
-                        icon="folder"
-                        ariaLabel={`Show ${r.name} in Explorer`}
-                        onClick={() => attempt(() => api.revealPath(r.path!))}
-                      />
+                      <Button small kind="ghost" icon="folder" ariaLabel={`Show ${r.name} in Explorer`} onClick={() => attempt(() => api.revealPath(r.path!))} />
                     )}
-                  </div>
+                  </ListRow>
                 ))}
-              </div>
+              </ListCard>
             )}
           </>
         )}
-      </div>
+      </PageBody>
     </>
   );
 }

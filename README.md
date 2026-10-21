@@ -62,20 +62,22 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test
 ### Layout
 
 ```
-src/                 React + TypeScript UI
-  pages/             one file per sidebar section
-  components/        shared UI (sidebar, switches, icons, logo)
-  state/store.tsx    app-wide state and data loading
-  lib/api.ts         typed wrappers around the Rust commands
-src-tauri/src/       Rust backend
-  apps.rs            installed apps (Uninstall registry keys)
-  startup.rs         Run keys, Startup folders, StartupApproved state
-  services.rs        services and their binaries
-  tasks.rs           scheduled task XML under System32\Tasks
-  cleanup.rs         cache and temp file locations
-  paths.rs           where UWiper keeps its own data
-  settings.rs        settings.toml
-  system.rs          elevation, Mica, Explorer, "Start with Windows"
+src/                     React + TypeScript UI (see src/README.md)
+  app/                   entry point, app shell, Tailwind theme
+  pages/                 one file per sidebar section
+  components/            app-specific pieces, grouped by area
+  ui/                    primitives: Button, Switch, Segmented, Pill, …
+  store/                 zustand store, hooks and selectors
+  lib/                   API wrappers, types, formatting, sample data
+src-tauri/src/           Rust backend
+  apps.rs                installed apps (Uninstall registry keys)
+  startup.rs             Run keys, Startup folders, StartupApproved state
+  services.rs            services and their binaries
+  tasks.rs               scheduled task XML under System32\Tasks
+  cleanup.rs             cache and temp file locations
+  paths.rs               where UWiper keeps its own data
+  settings.rs            settings.toml
+  system.rs              elevation, Mica, Explorer, "Start with Windows"
 ```
 
-Stack: [Tauri 2](https://v2.tauri.app), Rust, React 19, Vite.
+Stack: [Tauri 2](https://v2.tauri.app), Rust, React 19, Vite, Tailwind CSS 4, zustand.

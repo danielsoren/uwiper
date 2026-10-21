@@ -13,3 +13,6 @@ src-tauri/gen/
 .idea/
 .DS_Store
 Thumbs.db
+
+# CI logs
+ci-*.log
