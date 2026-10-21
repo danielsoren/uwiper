@@ -110,9 +110,14 @@ export function Cleanup() {
                             <span className="truncate text-label font-semibold">{i.name}</span>
                             <span className="text-small text-fg-3">{`${i.description} · ${plural(i.fileCount, 'file', 'files')}`}</span>
                           </span>
+                          {i.detected && <Tag>Found by name</Tag>}
                           {!i.defaultOn && <Tag>Optional</Tag>}
                           <span className="font-medium tabular-nums">{formatBytes(i.sizeBytes)}</span>
-                          <Icon name="chevron" size={14} className={cn('text-fg-4 transition-transform', open[i.id] && 'rotate-90')} />
+                          <Icon
+                            name="chevron"
+                            size={14}
+                            className={cn('text-fg-4 transition-transform', open[i.id] && 'rotate-90', i.paths.length === 0 && 'invisible')}
+                          />
                         </button>
                       </div>
                       <Collapse open={!!open[i.id]}>

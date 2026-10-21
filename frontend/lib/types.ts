@@ -103,6 +103,8 @@ export interface CleanupItem {
   name: string;
   description: string;
   defaultOn: boolean;
+  /** Found by folder name rather than from UWiper's list of known caches. */
+  detected: boolean;
   sizeBytes: number;
   fileCount: number;
   paths: string[];

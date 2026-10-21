@@ -1,5 +1,8 @@
 //! Caches and temporary files that Windows and apps rebuild on their own.
 //! Cleaning deletes them for good (no quarantine): apps simply rebuild them.
+//!
+//! Besides the known locations below, app caches are found by folder name
+//! (`Cache`, `GPUCache`, …) in AppData, so apps nobody listed show up too.
 
 use std::path::{Path, PathBuf};
 
@@ -8,17 +11,19 @@ use tauri::State;
 
 use crate::error::{blocking, Result};
 use crate::targets::Guard;
-use crate::util::{canonical, dir_size, expand_env, is_within};
+use crate::util::{canonical, dir_size, expand_env, is_within, parallel_map};
 use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupItem {
-    id: &'static str,
+    id: String,
     group: &'static str,
-    name: &'static str,
-    description: &'static str,
+    name: String,
+    description: String,
     default_on: bool,
+    /// Found by folder name rather than from the known list.
+    detected: bool,
     size_bytes: u64,
     file_count: u64,
     paths: Vec<String>,
@@ -31,10 +36,17 @@ enum Spec {
     File(&'static str),
     /// Files in a folder whose names start with a prefix.
     Prefixed(&'static str, &'static str),
+    /// Files in a folder whose names end with a suffix, such as ".log".
+    Ending(&'static str, &'static str),
+    /// In every subfolder of a folder whose name starts with a prefix, these
+    /// folders: `Children("…\\tdata", "user_data", &["cache"])`.
+    Children(&'static str, &'static str, &'static [&'static str]),
     /// Cache folders of every profile in a Chromium "User Data" folder.
     Chromium(&'static str),
     /// `cache2` of every Firefox profile.
     Firefox(&'static str),
+    /// The Recycle Bin on every drive.
+    RecycleBin,
 }
 
 struct Def {
@@ -48,6 +60,7 @@ struct Def {
 
 const BROWSER_NOTE: &str = "Cookies, passwords and history are never touched";
 const REDOWNLOAD: &str = "Downloaded again the next time it's needed";
+const CHAT_MEDIA: &str = "Images and media from chats, downloaded again when opened";
 
 #[rustfmt::skip]
 const DEFS: &[Def] = &[
@@ -65,6 +78,12 @@ const DEFS: &[Def] = &[
             Spec::Dir(r"%SystemRoot%\Minidump"),
             Spec::File(r"%SystemRoot%\MEMORY.DMP"),
         ] },
+    Def { id: "windows-logs", group: "windows", name: "Windows log files", description: "Servicing and setup logs (CBS, DISM)", default_on: true,
+        specs: &[
+            Spec::Ending(r"%SystemRoot%\Logs\CBS", ".log"),
+            Spec::Ending(r"%SystemRoot%\Logs\CBS", ".cab"),
+            Spec::Ending(r"%SystemRoot%\Logs\DISM", ".log"),
+        ] },
     Def { id: "shader-cache", group: "windows", name: "Shader caches", description: "DirectX and GPU driver caches, rebuilt by games", default_on: true,
         specs: &[
             Spec::Dir(r"%LOCALAPPDATA%\D3DSCache"),
@@ -74,6 +93,8 @@ const DEFS: &[Def] = &[
         ] },
     Def { id: "thumbnails", group: "windows", name: "Thumbnail cache", description: "Explorer previews, rebuilt on demand", default_on: true,
         specs: &[Spec::Prefixed(r"%LOCALAPPDATA%\Microsoft\Windows\Explorer", "thumbcache_")] },
+    Def { id: "recycle-bin", group: "windows", name: "Recycle Bin", description: "Files you deleted – emptying it can't be undone", default_on: false,
+        specs: &[Spec::RecycleBin] },
 
     Def { id: "chrome", group: "browsers", name: "Google Chrome – cache", description: BROWSER_NOTE, default_on: true,
         specs: &[Spec::Chromium(r"%LOCALAPPDATA%\Google\Chrome\User Data")] },
@@ -81,6 +102,21 @@ const DEFS: &[Def] = &[
         specs: &[Spec::Chromium(r"%LOCALAPPDATA%\Microsoft\Edge\User Data")] },
     Def { id: "brave", group: "browsers", name: "Brave – cache", description: BROWSER_NOTE, default_on: true,
         specs: &[Spec::Chromium(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data")] },
+    Def { id: "yandex", group: "browsers", name: "Yandex Browser – cache", description: BROWSER_NOTE, default_on: true,
+        specs: &[Spec::Chromium(r"%LOCALAPPDATA%\Yandex\YandexBrowser\User Data")] },
+    Def { id: "vivaldi", group: "browsers", name: "Vivaldi – cache", description: BROWSER_NOTE, default_on: true,
+        specs: &[Spec::Chromium(r"%LOCALAPPDATA%\Vivaldi\User Data")] },
+    Def { id: "chromium", group: "browsers", name: "Chromium – cache", description: BROWSER_NOTE, default_on: true,
+        specs: &[Spec::Chromium(r"%LOCALAPPDATA%\Chromium\User Data")] },
+    Def { id: "opera", group: "browsers", name: "Opera – cache", description: BROWSER_NOTE, default_on: true,
+        specs: &[
+            Spec::Dir(r"%LOCALAPPDATA%\Opera Software\Opera Stable\Cache"),
+            Spec::Dir(r"%APPDATA%\Opera Software\Opera Stable\Code Cache"),
+            Spec::Dir(r"%APPDATA%\Opera Software\Opera Stable\GPUCache"),
+            Spec::Dir(r"%LOCALAPPDATA%\Opera Software\Opera GX Stable\Cache"),
+            Spec::Dir(r"%APPDATA%\Opera Software\Opera GX Stable\Code Cache"),
+            Spec::Dir(r"%APPDATA%\Opera Software\Opera GX Stable\GPUCache"),
+        ] },
     Def { id: "firefox", group: "browsers", name: "Firefox – cache", description: BROWSER_NOTE, default_on: true,
         specs: &[Spec::Firefox(r"%LOCALAPPDATA%\Mozilla\Firefox\Profiles")] },
 
@@ -90,6 +126,8 @@ const DEFS: &[Def] = &[
         specs: &[Spec::Dir(r"%LOCALAPPDATA%\pnpm-cache")] },
     Def { id: "yarn", group: "developer", name: "Yarn cache", description: REDOWNLOAD, default_on: false,
         specs: &[Spec::Dir(r"%LOCALAPPDATA%\Yarn\Cache")] },
+    Def { id: "bun", group: "developer", name: "Bun cache", description: REDOWNLOAD, default_on: false,
+        specs: &[Spec::Dir(r"%USERPROFILE%\.bun\install\cache")] },
     Def { id: "pip", group: "developer", name: "pip cache", description: REDOWNLOAD, default_on: false,
         specs: &[Spec::Dir(r"%LOCALAPPDATA%\pip\Cache")] },
     Def { id: "nuget", group: "developer", name: "NuGet caches", description: "HTTP and v3 caches; the global packages folder is left alone", default_on: false,
@@ -100,13 +138,29 @@ const DEFS: &[Def] = &[
         ] },
     Def { id: "cargo", group: "developer", name: "Cargo registry cache", description: "Downloaded .crate archives", default_on: false,
         specs: &[Spec::Dir(r"%USERPROFILE%\.cargo\registry\cache")] },
+    Def { id: "go", group: "developer", name: "Go build cache", description: "Rebuilt on the next build", default_on: false,
+        specs: &[Spec::Dir(r"%LOCALAPPDATA%\go-build")] },
     Def { id: "gradle", group: "developer", name: "Gradle caches", description: REDOWNLOAD, default_on: false,
         specs: &[Spec::Dir(r"%USERPROFILE%\.gradle\caches")] },
+    Def { id: "maven", group: "developer", name: "Maven repository", description: REDOWNLOAD, default_on: false,
+        specs: &[Spec::Dir(r"%USERPROFILE%\.m2\repository")] },
+    Def { id: "electron", group: "developer", name: "Electron downloads", description: "Electron and electron-builder caches", default_on: false,
+        specs: &[
+            Spec::Dir(r"%LOCALAPPDATA%\electron\Cache"),
+            Spec::Dir(r"%LOCALAPPDATA%\electron-builder\Cache"),
+            Spec::Dir(r"%LOCALAPPDATA%\node-gyp\Cache"),
+        ] },
+    Def { id: "jetbrains", group: "developer", name: "JetBrains IDE caches", description: "Indexes are rebuilt when a project opens", default_on: false,
+        specs: &[Spec::Children(r"%LOCALAPPDATA%\JetBrains", "", &["caches"])] },
 
-    Def { id: "discord", group: "apps", name: "Discord – cache", description: "Images and media from chats", default_on: true,
+    Def { id: "telegram", group: "apps", name: "Telegram – cache", description: CHAT_MEDIA, default_on: true,
+        specs: &[Spec::Children(r"%APPDATA%\Telegram Desktop\tdata", "user_data", &["cache", "media_cache"])] },
+    Def { id: "discord", group: "apps", name: "Discord – cache", description: CHAT_MEDIA, default_on: true,
         specs: &[Spec::Dir(r"%APPDATA%\discord\Cache"), Spec::Dir(r"%APPDATA%\discord\Code Cache"), Spec::Dir(r"%APPDATA%\discord\GPUCache")] },
-    Def { id: "slack", group: "apps", name: "Slack – cache", description: "Images and media from chats", default_on: true,
+    Def { id: "slack", group: "apps", name: "Slack – cache", description: CHAT_MEDIA, default_on: true,
         specs: &[Spec::Dir(r"%APPDATA%\Slack\Cache"), Spec::Dir(r"%APPDATA%\Slack\Code Cache"), Spec::Dir(r"%APPDATA%\Slack\GPUCache")] },
+    Def { id: "teams", group: "apps", name: "Microsoft Teams (classic) – cache", description: CHAT_MEDIA, default_on: true,
+        specs: &[Spec::Dir(r"%APPDATA%\Microsoft\Teams\Cache"), Spec::Dir(r"%APPDATA%\Microsoft\Teams\Code Cache"), Spec::Dir(r"%APPDATA%\Microsoft\Teams\GPUCache")] },
     Def { id: "vscode", group: "apps", name: "VS Code – cache", description: "Rebuilt when VS Code starts", default_on: true,
         specs: &[
             Spec::Dir(r"%APPDATA%\Code\Cache"),
@@ -114,6 +168,8 @@ const DEFS: &[Def] = &[
             Spec::Dir(r"%APPDATA%\Code\Code Cache"),
             Spec::Dir(r"%APPDATA%\Code\GPUCache"),
         ] },
+    Def { id: "steam", group: "apps", name: "Steam – web cache", description: "Store and community pages; games are kept", default_on: true,
+        specs: &[Spec::Dir(r"%LOCALAPPDATA%\Steam\htmlcache")] },
     Def { id: "spotify", group: "apps", name: "Spotify – cache", description: "Streaming cache; offline downloads are kept", default_on: false,
         specs: &[Spec::Dir(r"%LOCALAPPDATA%\Spotify\Data")] },
 ];
@@ -124,18 +180,36 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
+fn files_where(dir: &str, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+    std::fs::read_dir(expand_env(dir))
+        .map(|it| {
+            it.flatten()
+                .filter(|e| e.path().is_file() && keep(&e.file_name().to_string_lossy().to_lowercase()))
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn resolve(spec: &Spec) -> Vec<PathBuf> {
     let existing = |p: PathBuf| p.exists().then_some(p);
     match spec {
         Spec::Dir(p) | Spec::File(p) => existing(PathBuf::from(expand_env(p))).into_iter().collect(),
-        Spec::Prefixed(dir, prefix) => std::fs::read_dir(expand_env(dir))
-            .map(|it| {
-                it.flatten()
-                    .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
-                    .map(|e| e.path())
-                    .collect()
+        Spec::Prefixed(dir, prefix) => files_where(dir, |name| name.starts_with(&prefix.to_lowercase())),
+        Spec::Ending(dir, suffix) => files_where(dir, |name| name.ends_with(&suffix.to_lowercase())),
+        Spec::Children(root, prefix, subs) => subdirs(Path::new(&expand_env(root)))
+            .into_iter()
+            .filter(|child| {
+                child
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().to_lowercase().starts_with(prefix))
             })
-            .unwrap_or_default(),
+            .flat_map(|child| {
+                subs.iter()
+                    .filter_map(move |sub| existing(child.join(sub)))
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
         Spec::Chromium(user_data) => {
             let root = PathBuf::from(expand_env(user_data));
             let mut out: Vec<PathBuf> = ["GrShaderCache", "ShaderCache"]
@@ -153,16 +227,13 @@ fn resolve(spec: &Spec) -> Vec<PathBuf> {
             .into_iter()
             .filter_map(|p| existing(p.join("cache2")))
             .collect(),
+        Spec::RecycleBin => Vec::new(),
     }
 }
 
-fn measure(def: &Def) -> Option<CleanupItem> {
-    let paths: Vec<PathBuf> = def.specs.iter().flat_map(resolve).collect();
-    if paths.is_empty() {
-        return None;
-    }
+fn measure_paths(paths: &[PathBuf]) -> (u64, u64) {
     let (mut size_bytes, mut file_count) = (0, 0);
-    for p in &paths {
+    for p in paths {
         if p.is_file() {
             size_bytes += p.metadata().map(|m| m.len()).unwrap_or(0);
             file_count += 1;
@@ -172,16 +243,172 @@ fn measure(def: &Def) -> Option<CleanupItem> {
             file_count += files;
         }
     }
-    Some(CleanupItem {
-        id: def.id,
+    (size_bytes, file_count)
+}
+
+fn measure(def: &Def) -> Option<CleanupItem> {
+    let item = |size_bytes, file_count, paths: Vec<PathBuf>| CleanupItem {
+        id: def.id.into(),
         group: def.group,
-        name: def.name,
-        description: def.description,
+        name: def.name.into(),
+        description: def.description.into(),
         default_on: def.default_on,
+        detected: false,
         size_bytes,
         file_count,
         paths: paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+    };
+    if def.specs.iter().any(|s| matches!(s, Spec::RecycleBin)) {
+        let (bytes, count) = imp::recycle_bin();
+        return (count > 0).then(|| item(bytes, count, Vec::new()));
+    }
+    let paths: Vec<PathBuf> = def.specs.iter().flat_map(resolve).collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let (size_bytes, file_count) = measure_paths(&paths);
+    Some(item(size_bytes, file_count, paths))
+}
+
+// ---------------------------------------------------------------------------
+// App caches found by folder name
+
+/// Folder names apps use for caches they rebuild.
+const CACHE_NAMES: [&str; 13] = [
+    "cache",
+    "caches",
+    "code cache",
+    "gpucache",
+    "dawncache",
+    "dawngraphitecache",
+    "dawnwebgpucache",
+    "graphitedawncache",
+    "grshadercache",
+    "shadercache",
+    "cacheddata",
+    "media_cache",
+    "htmlcache",
+];
+
+/// Folders in AppData that aren't one app's: Windows' own, packaged apps,
+/// installed programs, and the tool caches listed above.
+const NOT_APPS: [&str; 14] = [
+    "microsoft",
+    "packages",
+    "temp",
+    "programs",
+    "comms",
+    "connecteddevicesplatform",
+    "placeholdertilelogofolder",
+    "publishers",
+    "virtualstore",
+    "crashdumps",
+    "d3dscache",
+    "nvidia",
+    "amd",
+    "intel",
+];
+
+struct Detected {
+    id: String,
+    name: String,
+    folders: Vec<String>,
+    paths: Vec<PathBuf>,
+    /// Chromium-style caches (Electron apps): safe to clean by default.
+    chromium: bool,
+}
+
+/// App folders in AppData with cache folders inside (up to three levels
+/// down), skipping apps the known list already covers.
+fn detect(known: &[String], own: &[String]) -> Vec<Detected> {
+    let roots = ["%APPDATA%", "%LOCALAPPDATA%", r"%USERPROFILE%\AppData\LocalLow"];
+    let mut out = Vec::new();
+    for root in roots.iter().map(|r| expand_env(r)).filter(|r| !r.contains('%')) {
+        for app in subdirs(Path::new(&root)) {
+            let app_name = app
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let app_canon = canonical(&app.to_string_lossy());
+            let covered = known.iter().any(|k| is_within(k, &app_canon));
+            let ours = own.iter().any(|o| is_within(o, &app_canon) || is_within(&app_canon, o));
+            if NOT_APPS.contains(&app_name.to_lowercase().as_str()) || app_name.starts_with('.') || covered || ours {
+                continue;
+            }
+            let mut paths = Vec::new();
+            let mut folders = Vec::new();
+            let mut walker = walkdir::WalkDir::new(&app)
+                .min_depth(1)
+                .max_depth(3)
+                .follow_links(false)
+                .into_iter();
+            while let Some(Ok(entry)) = walker.next() {
+                if !entry.file_type().is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if CACHE_NAMES.contains(&name.to_lowercase().as_str()) {
+                    paths.push(entry.path().to_path_buf());
+                    if !folders.contains(&name) {
+                        folders.push(name);
+                    }
+                    walker.skip_current_dir();
+                }
+            }
+            if paths.is_empty() {
+                continue;
+            }
+            let lower: Vec<String> = folders.iter().map(|f| f.to_lowercase()).collect();
+            out.push(Detected {
+                id: format!("found:{app_canon}"),
+                chromium: lower.iter().any(|f| f == "gpucache" || f == "code cache"),
+                name: app_name,
+                folders,
+                paths,
+            });
+        }
+    }
+    out
+}
+
+fn known_paths() -> Vec<String> {
+    DEFS.iter()
+        .flat_map(|d| d.specs.iter().flat_map(resolve))
+        .map(|p| canonical(&p.to_string_lossy()))
+        .collect()
+}
+
+fn own_dirs(settings: &crate::settings::Settings) -> Vec<String> {
+    Guard::new(settings).own
+}
+
+#[tauri::command]
+pub async fn scan_cleanup(state: State<'_, AppState>) -> Result<Vec<CleanupItem>> {
+    let settings = state.settings.lock().unwrap().clone();
+    blocking(move || {
+        // Each category walks its own folders, so measure them in parallel.
+        let mut items: Vec<CleanupItem> = std::thread::scope(|scope| {
+            let handles: Vec<_> = DEFS.iter().map(|def| scope.spawn(move || measure(def))).collect();
+            handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+        });
+        let detected = detect(&known_paths(), &own_dirs(&settings));
+        let sizes = parallel_map(&detected, |d| measure_paths(&d.paths));
+        for (d, (size_bytes, file_count)) in detected.into_iter().zip(sizes) {
+            items.push(CleanupItem {
+                id: d.id,
+                group: "apps",
+                name: format!("{} – cache", d.name),
+                description: format!("Found by folder name: {}", d.folders.join(", ")),
+                default_on: d.chromium,
+                detected: true,
+                size_bytes,
+                file_count,
+                paths: d.paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            });
+        }
+        Ok(items)
     })
+    .await
 }
 
 #[derive(Serialize, Default, Debug)]
@@ -201,10 +428,27 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
         let mut report = CleanReport::default();
         let mut lines = vec!["Cleaned caches:".to_string()];
         // UWiper may run from inside %TEMP% (an opened zip) or keep its data there.
-        let own = Guard::new(&settings).own;
+        let own = own_dirs(&settings);
+        let mut jobs: Vec<(String, Vec<PathBuf>)> = Vec::new();
         for def in DEFS.iter().filter(|d| ids.iter().any(|id| id == d.id)) {
+            if def.specs.iter().any(|s| matches!(s, Spec::RecycleBin)) {
+                let (bytes, _) = imp::recycle_bin();
+                if imp::empty_recycle_bin() {
+                    report.freed_bytes += bytes;
+                    lines.push(format!("  {} – {bytes} bytes", def.name));
+                }
+                continue;
+            }
+            jobs.push((def.name.to_string(), def.specs.iter().flat_map(resolve).collect()));
+        }
+        if ids.iter().any(|id| id.starts_with("found:")) {
+            for d in detect(&known_paths(), &own).into_iter().filter(|d| ids.contains(&d.id)) {
+                jobs.push((format!("{} – cache", d.name), d.paths));
+            }
+        }
+        for (name, paths) in jobs {
             let before = report.freed_bytes;
-            for path in def.specs.iter().flat_map(resolve) {
+            for path in paths {
                 if is_own(&path, &own) {
                     continue;
                 }
@@ -214,7 +458,7 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
                     remove_file(&path, meta.len(), &mut report);
                 }
             }
-            lines.push(format!("  {} – {} bytes", def.name, report.freed_bytes - before));
+            lines.push(format!("  {name} – {} bytes", report.freed_bytes - before));
         }
         log::write(&settings, &lines);
         Ok(report)
@@ -258,17 +502,39 @@ fn empty_dir(dir: &Path, own: &[String], report: &mut CleanReport) {
     }
 }
 
-#[tauri::command]
-pub async fn scan_cleanup() -> Result<Vec<CleanupItem>> {
-    blocking(|| {
-        // Each category walks its own folders, so measure them in parallel.
-        let items = std::thread::scope(|scope| {
-            let handles: Vec<_> = DEFS.iter().map(|def| scope.spawn(move || measure(def))).collect();
-            handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
-        });
-        Ok(items)
-    })
-    .await
+#[cfg(not(windows))]
+mod imp {
+    pub fn recycle_bin() -> (u64, u64) {
+        (0, 0)
+    }
+
+    pub fn empty_recycle_bin() -> bool {
+        false
+    }
+}
+
+#[cfg(windows)]
+mod imp {
+    use windows_sys::Win32::UI::Shell::{
+        SHEmptyRecycleBinW, SHQueryRecycleBinW, SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHQUERYRBINFO,
+    };
+
+    /// Size and item count of the Recycle Bin on all drives.
+    pub fn recycle_bin() -> (u64, u64) {
+        let mut info = SHQUERYRBINFO {
+            cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+            ..Default::default()
+        };
+        if unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) } != 0 {
+            return (0, 0);
+        }
+        (info.i64Size.max(0) as u64, info.i64NumItems.max(0) as u64)
+    }
+
+    pub fn empty_recycle_bin() -> bool {
+        let flags = SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND;
+        unsafe { SHEmptyRecycleBinW(std::ptr::null_mut(), std::ptr::null(), flags) == 0 }
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +565,45 @@ mod tests {
         assert_eq!(item.file_count, 2);
         assert_eq!(item.paths.len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolves_nested_folders_by_prefix() {
+        let dir = std::env::temp_dir().join(format!("uwiper-tdata-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("user_data/cache")).unwrap();
+        std::fs::create_dir_all(dir.join("user_data#2/media_cache")).unwrap();
+        std::fs::create_dir_all(dir.join("D877F783D5D3EF8C/cache")).unwrap();
+        std::env::set_var("UWIPER_TDATA_TEST", &dir);
+        let mut found = resolve(&Spec::Children(
+            "%UWIPER_TDATA_TEST%",
+            "user_data",
+            &["cache", "media_cache"],
+        ));
+        found.sort();
+        let mut expected = vec![dir.join("user_data#2/media_cache"), dir.join("user_data/cache")];
+        expected.sort();
+        assert_eq!(found, expected);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn finds_app_caches_by_folder_name() {
+        let root = std::env::temp_dir().join(format!("uwiper-detect-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("SomeApp/GPUCache")).unwrap();
+        std::fs::create_dir_all(root.join("SomeApp/Partitions/main/Cache/Cache_Data")).unwrap();
+        std::fs::create_dir_all(root.join("Known/Cache")).unwrap();
+        std::fs::create_dir_all(root.join("NoCache/data")).unwrap();
+        std::env::set_var("APPDATA", &root);
+        std::env::set_var("LOCALAPPDATA", root.join("none"));
+        std::env::set_var("USERPROFILE", root.join("none"));
+
+        let known = vec![canonical(&root.join("Known/Cache").to_string_lossy())];
+        let found = detect(&known, &[]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "SomeApp");
+        assert!(found[0].chromium);
+        assert_eq!(found[0].paths.len(), 2, "the nested Cache, not its Cache_Data");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
