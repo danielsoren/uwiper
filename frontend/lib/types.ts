@@ -204,7 +204,4 @@ export interface Settings {
     windowButtons: 'windows' | 'macos';
     translucent: boolean;
   };
-  footprint: {
-    startWithWindows: boolean;
-  };
 }

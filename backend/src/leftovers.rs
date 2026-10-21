@@ -577,7 +577,7 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
             let program = service.binary.as_deref().unwrap_or_default();
             if !service.is_windows && inside_install(program) && !found.guard.is_excluded(program) {
                 let reason = format!(
-                    "Service \"{}\" runs a program from the app's folder",
+                    "Service “{}” runs a program from the app's folder",
                     service.display_name
                 );
                 found.add("service", service.removal, &reason, "high");

@@ -38,7 +38,7 @@ export function Leftovers() {
   const keepDays = useAppStore((s) => s.settings?.safety.keepDays ?? 30);
   const quarantine = useAppStore((s) => s.settings?.safety.quarantine ?? true);
   const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
-  const refresh = useAppStore((s) => s.refresh);
+  const afterChange = useAppStore((s) => s.afterChange);
   const notify = useAppStore((s) => s.notify);
   const startup = useResource('startup');
   const services = useResource('services');
@@ -131,7 +131,7 @@ export function Leftovers() {
       notify(errorText(e));
     }
     setRemoving(false);
-    refresh('startup', 'services', 'tasks', 'quarantine');
+    afterChange();
   };
 
   return (

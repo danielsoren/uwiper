@@ -33,6 +33,7 @@ pub fn run() {
             // Housekeeping: old quarantine batches and logs go away in the background.
             let for_cleanup = settings.clone();
             std::thread::spawn(move || {
+                system::remove_old_autostart();
                 quarantine::purge_expired(&for_cleanup);
                 log::purge(&for_cleanup);
             });

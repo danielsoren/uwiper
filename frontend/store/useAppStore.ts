@@ -66,6 +66,8 @@ interface AppState {
   load: <K extends ResourceKey>(key: K, force?: boolean) => void;
   /** Loads again whatever of these was loaded before, after something changed. */
   refresh: (...keys: ResourceKey[]) => void;
+  /** After anything was removed or restored: every list it can show up in. */
+  afterChange: () => void;
   /** Applies a change right away and saves it; a failed save rolls it back. */
   updateSettings: (change: (s: Settings) => Settings) => void;
   notify: (text: string) => void;
@@ -120,6 +122,8 @@ export const useAppStore = create<AppState>()((set, get) => {
     refresh: (...keys) => {
       for (const key of keys) if (get().res[key].requested) get().load(key, true);
     },
+
+    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks'),
 
     updateSettings: (change) => {
       const before = get().settings;

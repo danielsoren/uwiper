@@ -3,6 +3,7 @@ name = "uwiper"
 version = "0.2.0-beta.1"
 description = "Uninstall Windows apps completely and wipe every trace they leave"
 edition = "2021"
+license = "MIT"
 repository = "https://github.com/danielsoren/uwiper"
 homepage = "https://github.com/danielsoren/uwiper"
 keywords = ["windows", "uninstaller", "cleaner", "portable", "tauri"]

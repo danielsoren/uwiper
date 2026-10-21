@@ -26,6 +26,7 @@
     "url": "https://github.com/danielsoren/uwiper/issues"
   },
   "author": "danielsoren",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

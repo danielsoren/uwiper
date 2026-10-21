@@ -10,7 +10,7 @@ import { formatBytes, plural } from '../lib/format';
 import type { CleanupItem } from '../lib/types';
 import { useResource } from '../store/hooks';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Callout, Card, Checkbox, Icon, ListCard, Note, Skeleton, SkeletonRows, Tag } from '../ui';
+import { Button, Callout, Card, Checkbox, Collapse, Icon, ListCard, Note, Skeleton, SkeletonRows, Tag } from '../ui';
 
 export function Cleanup() {
   const attempt = useAppStore((s) => s.attempt);
@@ -115,8 +115,8 @@ export function Cleanup() {
                           <Icon name="chevron" size={14} className={cn('text-fg-4 transition-transform', open[i.id] && 'rotate-90')} />
                         </button>
                       </div>
-                      {open[i.id] && (
-                        <div className="flex flex-col items-start gap-0.5 pb-3 pl-[46px] pr-4">
+                      <Collapse open={!!open[i.id]}>
+                        <div className="flex flex-col items-start gap-0.5 pb-3 pl-[46px] pr-4 pt-1">
                           {i.paths.map((p) => (
                             <button
                               key={p}
@@ -128,7 +128,7 @@ export function Cleanup() {
                             </button>
                           ))}
                         </div>
-                      )}
+                      </Collapse>
                     </div>
                   ))}
                 </ListCard>

@@ -21,9 +21,10 @@
       "nsis"
     ],
     "publisher": "UWiper",
-    "copyright": "© 2026 UWiper contributors",
+    "copyright": "© 2026 danielsoren",
     "category": "Utility",
     "homepage": "https://github.com/danielsoren/uwiper",
+    "license": "MIT",
     "shortDescription": "Uninstall apps and wipe every trace they leave",
     "longDescription": "UWiper runs an app's own uninstaller, then finds what it left behind – folders, registry keys, services, scheduled tasks, startup entries and shortcuts – and moves what you pick to quarantine, ready to restore. It also cleans caches and is fully portable.",
     "icon": [

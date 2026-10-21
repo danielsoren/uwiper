@@ -5,7 +5,7 @@ import { Icon, type IconName } from './Icon';
 /** A quiet line of explanation with an icon. */
 export function Note({ icon = 'info', children }: { icon?: IconName; children: ReactNode }) {
   return (
-    <div className="flex items-start gap-2.5 px-1 text-small leading-normal text-fg-3 [&_strong]:font-semibold [&_strong]:text-fg-2">
+    <div className="flex items-start gap-2.5 px-[15px] text-small leading-normal text-fg-3 [&_strong]:font-semibold [&_strong]:text-fg-2">
       <Icon name={icon} size={16} className="mt-px" />
       <div>{children}</div>
     </div>

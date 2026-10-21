@@ -38,7 +38,7 @@ export function Overview() {
   const optionalBytes = items.filter((i) => !i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
   const broken = brokenEntries(startup.data, services.data, tasks.data);
   const appBytes = (apps.data ?? []).reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
-  const outside = (storage.data?.dirs ?? []).filter((d) => !d.inside).length + (settings?.footprint.startWithWindows ? 1 : 0);
+  const outside = (storage.data?.dirs ?? []).filter((d) => !d.inside).length;
 
   return (
     <>
@@ -120,7 +120,7 @@ export function Overview() {
             <p className="mb-3.5 text-small leading-normal text-fg-3">
               {outside === 0
                 ? 'Everything UWiper keeps is in this one folder. Nothing in AppData, ProgramData or the registry.'
-                : `${plural(outside, 'thing', 'things')} outside this folder, all listed in Settings.`}
+                : `${plural(outside, 'data folder', 'data folders')} elsewhere, as set in Settings.`}
             </p>
             <div className="flex flex-wrap gap-2.5">
               <Button small icon="folder" onClick={() => env && attempt(() => api.openFolder(env.home))}>

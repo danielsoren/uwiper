@@ -110,7 +110,6 @@ let settings: Settings = {
     exclusions: ['D:\\Games'],
   },
   appearance: { accent: '#0071E3', windowButtons: 'windows', translucent: true },
-  footprint: { startWithWindows: false },
 };
 
 function storage(): StorageInfo {

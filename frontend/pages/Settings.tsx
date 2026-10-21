@@ -7,7 +7,7 @@ import { formatBytes, plural } from '../lib/format';
 import type { Settings as SettingsT } from '../lib/types';
 import { useResource } from '../store/hooks';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Card, Chip, IconTile, Loading, Pill, Segmented, Skeleton, Swatch, Switch } from '../ui';
+import { Button, Card, Chip, IconTile, Loading, Segmented, Skeleton, Swatch, Switch } from '../ui';
 
 const ACCENTS: [string, string][] = [
   ['#0071E3', 'Blue'],
@@ -52,8 +52,7 @@ export function Settings() {
 
   const info = storage.data;
   const outsideDirs = (info?.dirs ?? []).filter((d) => !d.inside).length;
-  const outside = outsideDirs + (settings.footprint.startWithWindows ? 1 : 0);
-  const { storage: st, safety, scan, appearance, footprint } = settings;
+  const { storage: st, safety, scan, appearance } = settings;
 
   return (
     <>
@@ -69,7 +68,7 @@ export function Settings() {
             {info ? (
               <div className="text-small text-fg-3">
                 {formatBytes(info.homeSizeBytes)} inside ·{' '}
-                {outside === 0 ? 'nothing anywhere else' : `${plural(outside, 'thing', 'things')} elsewhere, all listed below`}
+                {outsideDirs === 0 ? 'nothing anywhere else' : `${plural(outsideDirs, 'folder', 'folders')} elsewhere, listed below`}
               </div>
             ) : (
               <Skeleton className="mt-1.5 h-2.5 w-56" />
@@ -94,6 +93,12 @@ export function Settings() {
             mono={info?.settingsFile}
             control={<Locked>Always next to UWiper</Locked>}
           />
+          <SettingsRow
+            label="Browser engine data"
+            sub="WebView2 keeps its profile here instead of in AppData"
+            mono={info ? `${info.home}\\webview` : undefined}
+            control={<Locked>Always next to UWiper</Locked>}
+          />
           {info ? (
             info.dirs.map((dir) => (
               <DataDirRow key={dir.key} dir={dir} editable={!st.oneFolder} onSave={(path) => set('storage', { [dir.key]: path })} />
@@ -107,22 +112,6 @@ export function Settings() {
           />
         </SettingsSection>
 
-        <SettingsSection title="Outside the UWiper folder" note="Every place UWiper writes anywhere else. Nothing else is ever created.">
-          <SettingsRow
-            label="Start with Windows"
-            sub="Off by default – UWiper doesn't need to run in the background"
-            mono="HKCU\…\CurrentVersion\Run\UWiper"
-            control={<Switch checked={footprint.startWithWindows} onChange={(v) => set('footprint', { startWithWindows: v })} label="Start with Windows" />}
-          />
-          <SettingsRow
-            label="WebView data"
-            sub="The browser engine's profile, kept inside the UWiper folder"
-            mono={info ? `${info.home}\\webview` : undefined}
-            control={<Pill tone="good">Inside</Pill>}
-          />
-          <SettingsRow label="Start menu shortcut" sub="UWiper is portable and doesn't add one" control={<Pill>Not created</Pill>} />
-          <SettingsRow label={'"Installed apps" entry'} sub="Not needed for a portable app – delete the folder to remove it" control={<Pill>Not created</Pill>} />
-        </SettingsSection>
 
         <SettingsSection title="Safety" note="Used when you uninstall apps, remove leftovers and clean caches.">
           <SettingsRow
@@ -248,13 +237,9 @@ export function Settings() {
           <SettingsRow
             label="UWiper is portable"
             sub={
-              <>
-                To remove it, delete its folder – that's all there is.
-                {footprint.startWithWindows && ' Turn off “Start with Windows” first so the Run entry goes too.'}
-              </>
+              <>To remove it, delete its folder – that's all there is. UWiper doesn't add shortcuts, startup entries or an “Installed apps” entry.</>
             }
             mono={info?.home}
-            warn={footprint.startWithWindows}
           />
         </SettingsSection>
 
