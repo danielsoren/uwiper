@@ -8,7 +8,7 @@ use tauri::State;
 
 use crate::error::{blocking, Result};
 use crate::settings::Settings;
-use crate::util::{dir_size, expand_env};
+use crate::util::{dir_size, expand_env, is_within};
 use crate::AppState;
 
 /// The UWiper folder. `UWIPER_HOME` overrides it; debug builds use a folder
@@ -70,10 +70,7 @@ pub struct StorageInfo {
 }
 
 fn is_inside(path: &Path, root: &Path) -> bool {
-    let p = path.to_string_lossy().to_ascii_lowercase();
-    let r = root.to_string_lossy().to_ascii_lowercase();
-    let r = r.trim_end_matches(['\\', '/']);
-    p == r || p.starts_with(&format!("{r}\\")) || p.starts_with(&format!("{r}/"))
+    is_within(&path.to_string_lossy(), &root.to_string_lossy())
 }
 
 /// Counts only what UWiper put in its folder, so keeping the exe in a big
