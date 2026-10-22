@@ -364,7 +364,7 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
         if app_is_gone(app) {
             if let Some(key) = apps::uninstall_key_path(&app.id) {
                 let reason = format!(
-                    "“{}” is listed as installed, but its uninstaller and folder are gone",
+                    "«{}» is listed as installed, but its uninstaller and folder are gone",
                     app.name
                 );
                 found.add("app", Target::RegistryKey { key }, &reason, "high");
@@ -373,7 +373,7 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
     }
 
     for item in startup.into_iter().filter(|i| i.file_exists == Some(false)) {
-        let reason = format!("“{}” starts a program that no longer exists", item.name);
+        let reason = format!("«{}» starts a program that no longer exists", item.name);
         found.add("startup", item.removal, &reason, "high");
     }
     for service in services
@@ -381,7 +381,7 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
         .filter(|s| s.file_exists == Some(false) && !s.is_windows)
     {
         let reason = format!(
-            "Service “{}” runs a program that no longer exists",
+            "Service «{}» runs a program that no longer exists",
             service.display_name
         );
         found.add("service", service.removal, &reason, "high");

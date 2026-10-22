@@ -39,7 +39,7 @@
 | ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML. Restore a whole batch in one click. Batches are deleted for good after 30 days (you choose). |
 | 👻 **Leftovers of apps long gone** | Folders and settings no installed app claims, apps still listed as installed whose files are gone, shortcuts and PATH entries pointing nowhere, startup entries, services and tasks whose programs are missing. Each with how sure UWiper is and when it last changed. |
 | 🧹 **Junk and caches** | Temp files, Windows Update downloads, crash dumps, logs, the Recycle Bin, caches of every Chromium and Firefox browser, Telegram, Discord, Steam and other apps – plus any app cache found by folder name, Store apps included. Cookies, passwords and history are never touched. |
-| 🛡️ **Hard to break things with** | Windows and Microsoft components, shared folders, other apps' folders and your own "Never touch" list are always off limits. |
+| 🛡️ **Hard to break things with** | Windows and Microsoft components, shared folders, other apps' folders and your own «Never touch» list are always off limits. |
 | 🎒 **Leaves no traces itself** | Fully portable: settings, quarantine, logs and even the WebView profile live next to the exe. Delete the folder and UWiper is gone. |
 
 ## 📸 A closer look
@@ -70,7 +70,7 @@
 3. For a full clean, hit **Restart as administrator** in the sidebar – leftovers in Program Files, services and scheduled tasks need it.
 
 > [!NOTE]
-> The exe isn't code-signed yet, so SmartScreen may say "Windows protected your PC" – click **More info → Run anyway**. UWiper needs WebView2, which Windows 10 and 11 already have.
+> The exe isn't code-signed yet, so SmartScreen may say «Windows protected your PC» – click **More info → Run anyway**. UWiper needs WebView2, which Windows 10 and 11 already have.
 
 > [!IMPORTANT]
 > UWiper removes things, and it's still a beta. Quarantine is on by default – keep it on while you try UWiper out.
@@ -115,7 +115,7 @@ backend/             Rust + Tauri
   src/paths.rs       where UWiper keeps its own data
   src/settings.rs    settings.toml
   src/log.rs         daily log of every change
-  src/system.rs      elevation, Mica, Explorer, "Start with Windows"
+  src/system.rs      elevation, Mica, Explorer
 assets/              logo, banner and screenshots
 ```
 

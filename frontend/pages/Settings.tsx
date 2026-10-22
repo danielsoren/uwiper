@@ -237,7 +237,7 @@ export function Settings() {
           <SettingsRow
             label="UWiper is portable"
             sub={
-              <>To remove it, delete its folder – that's all there is. UWiper doesn't add shortcuts, startup entries or an “Installed apps” entry.</>
+              <>To remove it, delete its folder – that's all there is. UWiper doesn't add shortcuts, startup entries or an «Installed apps» entry.</>
             }
             mono={info?.home}
           />

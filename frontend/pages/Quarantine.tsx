@@ -187,7 +187,7 @@ export function Quarantine() {
             </>
           }
         >
-          <h2 className="text-h2 font-bold">Delete “{deleting.title}” for good?</h2>
+          <h2 className="text-h2 font-bold">Delete «{deleting.title}» for good?</h2>
           <p className="mt-2 text-body leading-normal text-fg-3">
             {plural(deleting.items.length, 'item', 'items')} can't be put back afterwards.
           </p>

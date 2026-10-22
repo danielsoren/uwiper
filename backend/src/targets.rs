@@ -155,7 +155,7 @@ impl Guard {
 
     fn check_excluded(&self, path_or_key: &str) -> std::result::Result<(), String> {
         if self.is_excluded(path_or_key) {
-            return Err("On your “Never touch” list".into());
+            return Err("On your «Never touch» list".into());
         }
         Ok(())
     }

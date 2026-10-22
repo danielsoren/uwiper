@@ -29,7 +29,7 @@ Leftovers of apps that are long gone, and a lot more junk and caches. Still a be
 ### Better
 
 - Lists refresh as soon as anything is removed or restored, and data folders get an Open button.
-- Settings is simpler: the "Outside the UWiper folder" section and the Start with Windows option are gone. UWiper keeps nothing outside its folder, and an old startup entry is removed.
+- Settings is simpler: the «Outside the UWiper folder» section and the Start with Windows option are gone. UWiper keeps nothing outside its folder, and an old startup entry is removed.
 - Cleanup and Quarantine rows expand with an animation.
 - Notes line up with warnings; System's path column lines up across rows.
 - App icons: MSI product icons, and the app's exe one folder down (Adobe Acrobat and others that showed a letter).
@@ -51,7 +51,7 @@ Settings and data stay next to `UWiper.exe`. For a full clean, use **Restart as 
 - ♻️ **Quarantine.** Removed files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML. Restore a whole batch in one click; batches are deleted for good after the number of days set in Settings.
 - 🧹 **Cache cleaning.** Pick categories on the Cleanup page and clean them. Files in use are skipped.
 - 👻 **Remove broken entries.** Startup entries, services and scheduled tasks that point to missing files can be moved to quarantine from the Leftovers page.
-- 🛡️ **Safety rules.** Windows and Microsoft components, shared folders, other apps' folders, UWiper's own data and your "Never touch" list are never removed.
+- 🛡️ **Safety rules.** Windows and Microsoft components, shared folders, other apps' folders, UWiper's own data and your «Never touch» list are never removed.
 - 📝 **Log.** Every change is written to a daily log in UWiper's logs folder.
 
 ### Better
@@ -85,7 +85,7 @@ The exe isn't code-signed yet, so Windows SmartScreen may warn on first launch: 
 - **Leftovers** – startup entries, services and scheduled tasks that point to files that no longer exist.
 - **Cleanup** – measures temp files, Windows Update cache, crash dumps, shader and thumbnail caches, browser caches, developer caches (npm, pnpm, Yarn, pip, NuGet, Cargo, Gradle) and app caches.
 - **System** – startup items with Task Manager's enabled/disabled state, services, scheduled tasks.
-- **Settings** – where UWiper keeps its data, everything it writes outside its folder (only "Start with Windows", off by default), safety and scan options, accent color, Windows- or macOS-style window buttons, Mica on Windows 11.
+- **Settings** – where UWiper keeps its data, everything it writes outside its folder (only «Start with Windows», off by default), safety and scan options, accent color, Windows- or macOS-style window buttons, Mica on Windows 11.
 - Starts without administrator rights; **Restart as administrator** unlocks the parts that need them, like scheduled tasks.
 
 ### Coming in 0.2

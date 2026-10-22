@@ -187,9 +187,9 @@ function orphanSample(): Leftover[] {
   const key = (k: string) => ({ kind: 'registryKey' as const, key: k });
   const uninstall = 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OldGame';
   return [
-    it('app', key(uninstall), uninstall, '“Old Game” is listed as installed, but its uninstaller and folder are gone', 'high', null, null, true),
-    it('startup', startup.find((i) => i.name === 'RazerCentral')!.removal, 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\RazerCentral', '“RazerCentral” starts a program that no longer exists', 'high', null, null, true),
-    it('service', { kind: 'service', name: 'AdobeARMservice' }, 'Service AdobeARMservice', 'Service “Adobe Acrobat Update Service” runs a program that no longer exists', 'high', null, null, true),
+    it('app', key(uninstall), uninstall, '«Old Game» is listed as installed, but its uninstaller and folder are gone', 'high', null, null, true),
+    it('startup', startup.find((i) => i.name === 'RazerCentral')!.removal, 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\RazerCentral', '«RazerCentral» starts a program that no longer exists', 'high', null, null, true),
+    it('service', { kind: 'service', name: 'AdobeARMservice' }, 'Service AdobeARMservice', 'Service «Adobe Acrobat Update Service» runs a program that no longer exists', 'high', null, null, true),
     it('shortcut', path('C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk'), 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk', 'Points to C:\\Program Files (x86)\\Razer\\Synapse3\\Razer Synapse.exe, which no longer exists', 'high', 0.002, 2 * YEAR, true),
     it('environment', { kind: 'pathEntry', scope: 'user', entry: 'C:\\Tools\\old-sdk\\bin' }, 'User PATH: C:\\Tools\\old-sdk\\bin', 'In your PATH, but the folder no longer exists', 'high', null, null),
     it('folder', path('C:\\ProgramData\\Razer'), 'C:\\ProgramData\\Razer', 'Empty folder that no installed app uses', 'medium', 0, 2 * YEAR, true),

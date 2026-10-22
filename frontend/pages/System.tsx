@@ -44,7 +44,7 @@ const START: Record<ServiceItem['startType'], string> = {
 
 const HINT: Record<Exclude<Tab, 'drivers'>, string> = {
   startup: 'Programs that start when you sign in, from the Run keys and Startup folders. Enabled/disabled is the same switch Task Manager uses.',
-  services: 'Services registered on this PC. “File missing” means the service belongs to an app that is already gone.',
+  services: 'Services registered on this PC. «File missing» means the service belongs to an app that is already gone.',
   tasks: 'Scheduled tasks. Tasks that run a missing file are leftovers from removed apps.',
 };
 
