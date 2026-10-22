@@ -56,7 +56,7 @@ const START_OPTIONS: { value: ServiceStart; label: string }[] = [
 
 const HINT: Record<Exclude<Tab, 'drivers'>, string> = {
   startup:
-    'Programs that start when you sign in, from the Run keys and Startup folders. The switch is the same one Task Manager uses – the entry itself stays.',
+    'Programs that start when you sign in, from the Run keys, Startup folders and app packages. The switch is the same one Task Manager uses – the entry itself stays.',
   services: 'Services registered on this PC and how they start. «Manual» services start only when an app asks for them.',
   tasks: 'Scheduled tasks. A task that is switched off stays in place and can be switched back on at any time.',
 };
@@ -65,6 +65,7 @@ const ICON: Record<Tab, IconName> = { startup: 'power', services: 'cog', tasks: 
 
 const WINDOWS_HINT = 'Part of Windows – UWiper leaves it as is';
 const ADMIN_HINT = 'Needs administrator rights';
+const POLICY_HINT = 'A policy on this PC sets it – UWiper leaves it as is';
 
 /** A state that can't be changed here, shown as a label instead of a control. */
 function Locked({ tone, label, hint }: { tone: PillTone; label: string; hint: string }) {
@@ -131,15 +132,15 @@ export function System() {
       ? (startup.data ?? []).map((i) => ({
           key: i.id,
           name: i.name,
-          sub: i.location,
+          sub: [i.publisher, i.location].filter(Boolean).join(' · '),
           path: i.target ?? i.command,
           problem: i.fileExists === false,
           windows: i.isWindows,
           control:
             i.fileExists === false ? (
               missing
-            ) : i.isWindows ? (
-              <Locked tone={i.enabled ? 'good' : 'dim'} label={i.enabled ? 'On' : 'Off'} hint={WINDOWS_HINT} />
+            ) : i.isWindows || i.policy ? (
+              <Locked tone={i.enabled ? 'good' : 'dim'} label={i.enabled ? 'On' : 'Off'} hint={i.isWindows ? WINDOWS_HINT : POLICY_HINT} />
             ) : (
               <span title={i.needsAdmin && !elevated ? ADMIN_HINT : undefined} className="flex">
                 <Switch
@@ -159,7 +160,7 @@ export function System() {
             return {
               key: s.name,
               name: s.displayName,
-              sub: s.name,
+              sub: [s.name, s.publisher].filter(Boolean).join(' · '),
               path: s.binary,
               problem: s.fileExists === false,
               windows: s.isWindows,

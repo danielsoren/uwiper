@@ -630,8 +630,11 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     if look.files || look.registry {
         for item in crate::startup::list().unwrap_or_default() {
             let program = item.target.as_deref().unwrap_or_default();
+            let Some(removal) = item.removal else {
+                continue;
+            };
             if !item.is_windows && inside_install(program) && !found.guard.is_excluded(program) {
-                found.add("startup", item.removal, "Starts the removed app with Windows", "high");
+                found.add("startup", removal, "Starts the removed app with Windows", "high");
             }
         }
     }

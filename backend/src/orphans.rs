@@ -411,8 +411,11 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
         .into_iter()
         .filter(|i| i.file_exists == Some(false) && !i.is_windows)
     {
+        let Some(removal) = item.removal else {
+            continue;
+        };
         let reason = format!("«{}» starts a program that no longer exists", item.name);
-        found.add("startup", item.removal, &reason, "high");
+        found.add("startup", removal, &reason, "high");
     }
     for service in services
         .into_iter()

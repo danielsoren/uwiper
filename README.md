@@ -137,7 +137,7 @@ backend/             Rust + Tauri
   src/targets.rs     removable things, safety rules, backup and restore
   src/quarantine.rs  quarantine batches
   src/cleanup.rs     caches: known ones, found by name or layout; cleaning
-  src/startup.rs     Run keys, Startup folders, switching them on and off
+  src/startup.rs     Run keys, Startup folders, app package startup tasks, switching them
   src/services.rs    services, their binaries and how they start
   src/tasks.rs       scheduled task XML under System32\Tasks, on and off
   src/drivers.rs     third-party driver packages and their older versions

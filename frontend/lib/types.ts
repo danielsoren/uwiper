@@ -134,13 +134,18 @@ export interface StartupItem {
   name: string;
   command: string;
   location: string;
+  /** Who made it: the program's company, or the app package's publisher. */
+  publisher: string | null;
   target: string | null;
   fileExists: boolean | null;
   enabled: boolean;
   isWindows: boolean;
   /** Machine-wide entries need administrator rights to switch. */
   needsAdmin: boolean;
-  removal: Target;
+  /** A policy on this PC turns it on or off. */
+  policy: boolean;
+  /** An app package's startup task has nothing to remove: it goes with the app. */
+  removal: Target | null;
 }
 
 /** What a service can be set to; boot and system start types are left alone. */
@@ -151,6 +156,8 @@ export interface ServiceItem {
   displayName: string;
   binary: string | null;
   fileExists: boolean | null;
+  /** The company its program names. */
+  publisher: string | null;
   startType: 'boot' | 'system' | 'automatic' | 'manual' | 'disabled';
   delayed: boolean;
   isWindows: boolean;

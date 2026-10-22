@@ -492,7 +492,7 @@ fn look_lists(look: &mut Look) {
     }
     // Startup folder shortcuts are files in the Start menu, already looked at.
     for s in crate::startup::list().unwrap_or_default() {
-        let Target::RegistryValue { key, name } = &s.removal else {
+        let Some(Target::RegistryValue { key, name }) = &s.removal else {
             continue;
         };
         if s.is_windows || s.target.as_deref().is_some_and(microsoft_path) {
@@ -502,7 +502,10 @@ fn look_lists(look: &mut Look) {
             format!("r:{}|{}", key.to_lowercase(), name.to_lowercase()),
             None,
             "startup",
-            s.removal.clone(),
+            Target::RegistryValue {
+                key: key.clone(),
+                name: name.clone(),
+            },
             true,
         );
         entry.program = s.target.clone();

@@ -32,6 +32,13 @@ The first full release. An independent safety audit of 0.5 went through everythi
 - Quarantine backs an item up and records it on disk before changing anything. If the record can't be written, nothing more is removed. The next start finishes whatever a crash interrupted.
 - Restore leaves things alone that are there again (a reinstalled app's settings, service or task) and keeps the quarantined copy.
 
+### Startup like Task Manager
+
+- Startup tasks of Microsoft Store and other packaged apps (ChatGPT, Terminal and the like) are listed and can be switched on and off.
+- Names and publishers come from the programs themselves, as in Task Manager. Services show their publisher too.
+- Windows items are told by publisher: helpers of Realtek, Intel and other drivers that sit in System32 aren't hidden as Windows any more – in Startup and in Services.
+- An entry that runs rundll32, a command shell or a script host is judged by the file it runs.
+
 ### Drivers and install tracking
 
 - Driver Store locations come from Windows' own SetupAPI, so every package is found and paired with its other versions. Extension packages and packages UWiper can't locate show Unknown and are never removed.

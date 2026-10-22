@@ -194,6 +194,167 @@ pub fn is_windows_component(path: &str) -> bool {
         || under("ProgramData", &[r"microsoft\windows defender"])
 }
 
+/// What a program's version resource says about it: the company that made
+/// it and its description, the two things Task Manager shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FileInfo {
+    pub company: Option<String>,
+    pub description: Option<String>,
+}
+
+/// `FileInfo` of a file, read once per path.
+pub fn file_info(path: &str) -> FileInfo {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<HashMap<String, FileInfo>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = norm_path(path);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return hit;
+    }
+    let info = read_file_info(path);
+    if let Ok(mut c) = cache.lock() {
+        c.insert(key, info.clone());
+    }
+    info
+}
+
+#[cfg(not(windows))]
+fn read_file_info(_path: &str) -> FileInfo {
+    FileInfo::default()
+}
+
+#[cfg(windows)]
+fn read_file_info(path: &str) -> FileInfo {
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+
+    let wide = |s: &str| {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let file = wide(path);
+    let size = unsafe { GetFileVersionInfoSizeW(file.as_ptr(), std::ptr::null_mut()) };
+    if size == 0 {
+        return FileInfo::default();
+    }
+    let mut data = vec![0u8; size as usize];
+    if unsafe { GetFileVersionInfoW(file.as_ptr(), 0, size, data.as_mut_ptr().cast()) } == 0 {
+        return FileInfo::default();
+    }
+    // The pointers point into `data`; `len` counts bytes for binary values and characters for text.
+    let query = |sub: &str| {
+        let sub = wide(sub);
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        let ok = unsafe { VerQueryValueW(data.as_ptr().cast(), sub.as_ptr(), &mut ptr, &mut len) } != 0;
+        (ok && !ptr.is_null() && len > 0).then_some((ptr as *const u16, len as usize))
+    };
+    let mut languages: Vec<String> = query(r"\VarFileInfo\Translation")
+        .map(|(ptr, len)| {
+            let pairs = unsafe { std::slice::from_raw_parts(ptr, len / 2) };
+            pairs
+                .chunks_exact(2)
+                .map(|p| format!("{:04x}{:04x}", p[0], p[1]))
+                .collect()
+        })
+        .unwrap_or_default();
+    languages.extend(["040904b0", "040904e4", "000004b0"].map(String::from));
+    let text = |name: &str| {
+        languages.iter().find_map(|language| {
+            let (ptr, len) = query(&format!(r"\StringFileInfo\{language}\{name}"))?;
+            let units = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let value = String::from_utf16_lossy(units)
+                .trim_end_matches('\0')
+                .trim()
+                .to_string();
+            (!value.is_empty()).then_some(value)
+        })
+    };
+    FileInfo {
+        company: text("CompanyName"),
+        description: text("FileDescription"),
+    }
+}
+
+/// A part of Windows the way Task Manager tells: in a Windows place and made
+/// by Microsoft. Drivers' helper programs from Realtek, Intel and others also
+/// sit in System32, and they aren't Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_windows_program(path: &str) -> bool {
+    is_windows_component(path)
+        && file_info(path)
+            .company
+            .is_none_or(|c| c.to_lowercase().starts_with("microsoft"))
+}
+
+/// Reads an indirect string such as `@%SystemRoot%\system32\audiosrv.dll,-204`
+/// or `@{Package?ms-resource://…}` the way Windows shows it.
+#[cfg(windows)]
+pub fn indirect_string(source: &str) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::SHLoadIndirectString;
+
+    let source: Vec<u16> = std::ffi::OsStr::new(source).encode_wide().chain(Some(0)).collect();
+    let mut buf = vec![0u16; 512];
+    let hr = unsafe { SHLoadIndirectString(source.as_ptr(), buf.as_mut_ptr(), buf.len() as u32, std::ptr::null()) };
+    if hr < 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    let text = String::from_utf16_lossy(&buf[..len]).trim().to_string();
+    (!text.is_empty() && !text.starts_with('@') && !text.starts_with("ms-resource:")).then_some(text)
+}
+
+/// Programs that only run another file: rundll32, the command shells and
+/// the script hosts.
+const HOSTS: [&str; 7] = ["rundll32", "cmd", "powershell", "pwsh", "wscript", "cscript", "mshta"];
+
+/// The file a host program runs: the first argument that is a full path to a
+/// library, script or program. `None` when `program` isn't a host or no
+/// argument is such a path.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn hosted_file(program: &str, args: &str) -> Option<String> {
+    const EXTS: [&str; 11] = [
+        ".dll", ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".hta",
+    ];
+    if !is_host(program) {
+        return None;
+    }
+    let mut tokens = Vec::new();
+    let mut rest = args.trim();
+    while !rest.is_empty() {
+        let (token, after) = match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
+            None => rest.split_once(char::is_whitespace).unwrap_or((rest, "")),
+        };
+        tokens.push(token);
+        rest = after.trim_start();
+    }
+    tokens.into_iter().find_map(|token| {
+        // rundll32 takes `file.dll,Entry`.
+        let file = expand_env(token.split(',').next().unwrap_or_default().trim());
+        let b = file.as_bytes();
+        let absolute = (b.len() > 3 && b[1] == b':' && b[2] == b'\\') || file.starts_with(r"\\");
+        let lower = file.to_ascii_lowercase();
+        (absolute && EXTS.iter().any(|ext| lower.ends_with(ext))).then_some(file)
+    })
+}
+
+pub fn is_host(program: &str) -> bool {
+    let name = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    HOSTS.contains(&stem)
+}
+
 /// Lowercase, backslashes, no trailing separator: for comparing Windows paths.
 pub fn norm_path(path: &str) -> String {
     path.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase()
@@ -418,6 +579,30 @@ pub fn dir_size(path: &Path) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_what_hosts_run() {
+        let rundll = r"C:\Windows\System32\rundll32.exe";
+        assert_eq!(
+            hosted_file(rundll, r#""C:\Program Files\Vendor\tray.dll",Start /quiet"#).as_deref(),
+            Some(r"C:\Program Files\Vendor\tray.dll")
+        );
+        assert_eq!(
+            hosted_file(r"C:\Windows\System32\cmd.exe", r#"/c start "" C:\Tools\sync.bat"#).as_deref(),
+            Some(r"C:\Tools\sync.bat")
+        );
+        assert_eq!(
+            hosted_file(
+                "powershell.exe",
+                r"-ExecutionPolicy Bypass -File \\nas\scripts\login.ps1"
+            )
+            .as_deref(),
+            Some(r"\\nas\scripts\login.ps1")
+        );
+        assert_eq!(hosted_file(rundll, "shell32.dll,Control_RunDLL"), None);
+        assert_eq!(hosted_file(r"C:\App\app.exe", r"C:\App\plugin.dll"), None);
+        assert!(is_host("RUNDLL32.EXE") && is_host(r"C:\x\pwsh.exe") && !is_host("app.exe"));
+    }
 
     #[test]
     fn splits_command_lines() {

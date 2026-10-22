@@ -87,23 +87,31 @@ let cleanup: CleanupItem[] = [
 
 const RUN = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 let startup: StartupItem[] = ([
-  { id: '1', name: 'Discord', command: '"C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe" --processStart Discord.exe', location: 'HKCU\\…\\Run', target: 'C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe', fileExists: true, enabled: true, isWindows: false },
-  { id: '2', name: 'Docker Desktop', command: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe -Autostart', location: 'HKCU\\…\\Run', target: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe', fileExists: true, enabled: true, isWindows: false },
-  { id: '3', name: 'RazerCentral', command: '"C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe" /silent', location: 'HKLM\\…\\Run (32-bit)', target: 'C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe', fileExists: false, enabled: true, isWindows: false },
-  { id: '4', name: 'Steam', command: '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent', location: 'HKCU\\…\\Run', target: 'C:\\Program Files (x86)\\Steam\\steam.exe', fileExists: true, enabled: false, isWindows: false },
-  { id: '5', name: 'SecurityHealth', command: '%windir%\\system32\\SecurityHealthSystray.exe', location: 'HKLM\\…\\Run', target: 'C:\\Windows\\system32\\SecurityHealthSystray.exe', fileExists: true, enabled: true, isWindows: true },
-] as Omit<StartupItem, 'removal' | 'needsAdmin'>[]).map((i) => ({
+  { id: '1', name: 'Discord', publisher: 'Discord Inc.', command: '"C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe" --processStart Discord.exe', location: 'HKCU\\…\\Run', target: 'C:\\Users\\you\\AppData\\Local\\Discord\\Update.exe', fileExists: true, enabled: true, isWindows: false },
+  { id: '2', name: 'Docker Desktop', publisher: 'Docker Inc.', command: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe -Autostart', location: 'HKCU\\…\\Run', target: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe', fileExists: true, enabled: true, isWindows: false },
+  { id: '3', name: 'RazerCentral', publisher: null, command: '"C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe" /silent', location: 'HKLM\\…\\Run (32-bit)', target: 'C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe', fileExists: false, enabled: true, isWindows: false },
+  { id: '4', name: 'Steam', publisher: 'Valve Corporation', command: '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent', location: 'HKCU\\…\\Run', target: 'C:\\Program Files (x86)\\Steam\\steam.exe', fileExists: true, enabled: false, isWindows: false },
+  { id: '5', name: 'Windows Security notification icon', publisher: 'Microsoft Corporation', command: '%windir%\\system32\\SecurityHealthSystray.exe', location: 'HKLM\\…\\Run', target: 'C:\\Windows\\system32\\SecurityHealthSystray.exe', fileExists: true, enabled: true, isWindows: true },
+  { id: '6', name: 'Realtek HD Audio Universal Service', publisher: 'Realtek Semiconductor', command: 'C:\\Windows\\System32\\RtkAudUService64.exe -background', location: 'HKLM\\…\\Run', target: 'C:\\Windows\\System32\\RtkAudUService64.exe', fileExists: true, enabled: true, isWindows: false },
+  { id: '7', name: 'ChatGPT', publisher: 'OpenAI', command: 'C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT-Desktop_1.2025.258.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe', location: 'Packaged app', target: 'C:\\Program Files\\WindowsApps\\OpenAI.ChatGPT-Desktop_1.2025.258.0_x64__2p2nqsd0c76g0\\app\\ChatGPT.exe', fileExists: true, enabled: true, isWindows: false },
+  { id: '8', name: 'Terminal', publisher: 'Microsoft Corporation', command: 'C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.23.12811.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe', location: 'Packaged app', target: 'C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.23.12811.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe', fileExists: true, enabled: false, isWindows: false },
+] as Omit<StartupItem, 'removal' | 'needsAdmin' | 'policy'>[]).map((i) => ({
   ...i,
   needsAdmin: i.location.startsWith('HKLM'),
-  removal: { kind: 'registryValue', key: i.location.startsWith('HKLM') ? RUN.replace('HKCU\\Software', 'HKLM\\SOFTWARE\\WOW6432Node') : RUN, name: i.name },
+  policy: false,
+  removal:
+    i.location === 'Packaged app'
+      ? null
+      : { kind: 'registryValue', key: i.location.startsWith('HKLM') ? RUN.replace('HKCU\\Software', 'HKLM\\SOFTWARE\\WOW6432Node') : RUN, name: i.name },
 }));
 
 let services: ServiceItem[] = ([
-  { name: 'AdobeARMservice', displayName: 'Adobe Acrobat Update Service', binary: 'C:\\Program Files (x86)\\Common Files\\Adobe\\ARM\\1.0\\armsvc.exe', fileExists: false, startType: 'automatic', delayed: false, isWindows: false },
-  { name: 'com.docker.service', displayName: 'Docker Desktop Service', binary: 'C:\\Program Files\\Docker\\Docker\\com.docker.service', fileExists: true, startType: 'manual', delayed: false, isWindows: false },
-  { name: 'LGHUBUpdaterService', displayName: 'LGHUB Updater Service', binary: 'C:\\Program Files\\LGHUB\\lghub_updater.exe', fileExists: true, startType: 'automatic', delayed: false, isWindows: false },
-  { name: 'Steam Client Service', displayName: 'Steam Client Service', binary: 'C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe', fileExists: true, startType: 'manual', delayed: false, isWindows: false },
-  { name: 'wuauserv', displayName: 'Windows Update', binary: 'C:\\Windows\\system32\\wuaueng.dll', fileExists: true, startType: 'manual', delayed: false, isWindows: true },
+  { name: 'AdobeARMservice', displayName: 'Adobe Acrobat Update Service', binary: 'C:\\Program Files (x86)\\Common Files\\Adobe\\ARM\\1.0\\armsvc.exe', fileExists: false, publisher: null, startType: 'automatic', delayed: false, isWindows: false },
+  { name: 'com.docker.service', displayName: 'Docker Desktop Service', binary: 'C:\\Program Files\\Docker\\Docker\\com.docker.service', fileExists: true, publisher: 'Docker Inc.', startType: 'manual', delayed: false, isWindows: false },
+  { name: 'LGHUBUpdaterService', displayName: 'LGHUB Updater Service', binary: 'C:\\Program Files\\LGHUB\\lghub_updater.exe', fileExists: true, publisher: 'Logitech', startType: 'automatic', delayed: false, isWindows: false },
+  { name: 'Steam Client Service', displayName: 'Steam Client Service', binary: 'C:\\Program Files (x86)\\Common Files\\Steam\\steamservice.exe', fileExists: true, publisher: 'Valve Corporation', startType: 'manual', delayed: false, isWindows: false },
+  { name: 'RtkAudioUniversalService', displayName: 'Realtek Audio Universal Service', binary: 'C:\\Windows\\System32\\RtkAudUService64.exe', fileExists: true, publisher: 'Realtek Semiconductor', startType: 'automatic', delayed: false, isWindows: false },
+  { name: 'wuauserv', displayName: 'Windows Update', binary: 'C:\\Windows\\system32\\wuaueng.dll', fileExists: true, publisher: 'Microsoft Corporation', startType: 'manual', delayed: false, isWindows: true },
 ] as Omit<ServiceItem, 'removal'>[]).map((i) => ({ ...i, removal: { kind: 'service', name: i.name } }));
 
 let tasks: TaskItem[] = ([
@@ -211,7 +219,7 @@ function orphanSample(): Leftover[] {
   const uninstall = 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OldGame';
   return [
     it('app', key(uninstall), uninstall, '«Old Game» is listed as installed, but its uninstaller and folder are gone', 'high', null, null, true),
-    it('startup', startup.find((i) => i.name === 'RazerCentral')!.removal, 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\RazerCentral', '«RazerCentral» starts a program that no longer exists', 'high', null, null, true),
+    it('startup', startup.find((i) => i.name === 'RazerCentral')!.removal!, 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\RazerCentral', '«RazerCentral» starts a program that no longer exists', 'high', null, null, true),
     it('service', { kind: 'service', name: 'AdobeARMservice' }, 'Service AdobeARMservice', 'Service «Adobe Acrobat Update Service» runs a program that no longer exists', 'high', null, null, true),
     it('shortcut', path('C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk'), 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk', 'Points to C:\\Program Files (x86)\\Razer\\Synapse3\\Razer Synapse.exe, which no longer exists', 'high', 0.002, 2 * YEAR, true),
     it('environment', { kind: 'pathEntry', scope: 'user', entry: 'C:\\Tools\\old-sdk\\bin' }, 'User PATH: C:\\Tools\\old-sdk\\bin', "In your PATH, but the folder doesn't exist – some tools create it on first use", 'low', null, null),
@@ -230,7 +238,7 @@ const sameTarget = (a: Removal['target'], b: Removal['target']) => JSON.stringif
 function remove(title: string, items: Removal[]): RemoveReport {
   const gone = (t: Removal['target']) => items.some((i) => sameTarget(i.target, t));
   const before = orphans ?? orphanSample();
-  startup = startup.filter((i) => !gone(i.removal));
+  startup = startup.filter((i) => !i.removal || !gone(i.removal));
   services = services.filter((i) => !gone(i.removal));
   tasks = tasks.filter((i) => !gone(i.removal));
   drivers = drivers.filter((i) => !gone(i.removal));
