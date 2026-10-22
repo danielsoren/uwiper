@@ -172,15 +172,20 @@ fn defaults() -> Settings {
 /// says where it went.
 pub fn load() -> (Settings, Option<String>) {
     let file = paths::settings_file();
-    let Ok(text) = std::fs::read_to_string(&file) else {
-        let defaults = defaults();
-        // Unreadable but there: leave it be.
-        if !file.exists() {
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let defaults = defaults();
             let _ = persist(&defaults);
+            return (defaults, None);
         }
-        return (defaults, None);
+        // There but locked or not allowed: left as it is.
+        Err(e) => {
+            let note = format!("settings.toml couldn't be opened ({e}), so UWiper uses its defaults for now.");
+            return (defaults(), Some(note));
+        }
     };
-    match toml::from_str(&text) {
+    match parse(&bytes) {
         Ok(settings) => {
             let (settings, changed, note) = migrate(settings);
             if changed {
@@ -188,27 +193,32 @@ pub fn load() -> (Settings, Option<String>) {
             }
             (settings, note)
         }
-        Err(e) => {
+        Err(why) => {
             let aside = file.with_file_name(format!("settings.broken-{}.toml", crate::util::now_secs()));
             let note = match std::fs::rename(&file, &aside) {
                 Ok(()) => {
                     let _ = persist(&defaults());
                     format!(
-                        "settings.toml couldn't be read ({}), so UWiper started with its defaults. \
+                        "settings.toml couldn't be read ({why}), so UWiper started with its defaults. \
                          Your file is kept as {}.",
-                        e.message(),
                         aside.file_name().unwrap_or_default().to_string_lossy()
                     )
                 }
                 Err(_) => format!(
-                    "settings.toml couldn't be read ({}), so UWiper uses its defaults for now. \
-                     Saving settings will replace the file.",
-                    e.message()
+                    "settings.toml couldn't be read ({why}), so UWiper uses its defaults for now. \
+                     Saving settings will replace the file."
                 ),
             };
             (defaults(), Some(note))
         }
     }
+}
+
+/// The settings in a file's bytes, or why they can't be read. A UTF-8 byte
+/// order mark, as older Notepads write, is fine.
+fn parse(bytes: &[u8]) -> std::result::Result<Settings, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| "it isn't saved as UTF-8".to_string())?;
+    toml::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.message().to_string())
 }
 
 /// A note about the settings for the user, once: why they were reset or
@@ -246,6 +256,14 @@ pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_why_a_file_cant_be_read() {
+        assert!(parse("\u{feff}[safety]\nkeepDays = 7\n".as_bytes()).is_ok_and(|s| s.safety.keep_days == 7));
+        // "Ä" as an old Notepad saves it in ANSI.
+        assert!(parse(b"[storage]\nquarantine = \"D:\\\xc4\"\n").is_err_and(|why| why.contains("UTF-8")));
+        assert!(parse(b"[safety]\nkeepDays = \"lots\"\n").is_err());
+    }
 
     #[test]
     fn missing_fields_fall_back_to_defaults() {

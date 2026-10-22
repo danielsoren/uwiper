@@ -406,9 +406,12 @@ fn interrupted(item: &Item, dir: &Path) -> Interrupted {
             (true, true) => Interrupted::Partly,
         },
         _ if !there => Interrupted::Done,
-        // A key tree or a service can stop half-way; whether it started shows in its fingerprint.
+        // A key tree or a service can stop half-way. A key without subkeys
+        // shows in its fingerprint whether it started; one with subkeys
+        // loses the deepest first, which its own fingerprint doesn't show,
+        // so it's kept – importing its backup over it again does no harm.
         Backup::Reg { .. } => match (&item.before, targets::fingerprint(&item.target)) {
-            (Some(before), Some(now)) if *before == now => Interrupted::NotStarted,
+            (Some(before), Some(now)) if *before == now && before.starts_with("k:0:") => Interrupted::NotStarted,
             _ => Interrupted::Partly,
         },
         Backup::TaskXml { .. } => Interrupted::Partly,

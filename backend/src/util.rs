@@ -662,9 +662,10 @@ fn pin_one(dir: &Path, follow: bool) -> std::result::Result<Pin, Blocked> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, FileAttributeTagInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     };
     let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
     let flags = FILE_FLAG_BACKUP_SEMANTICS | if follow { 0 } else { FILE_FLAG_OPEN_REPARSE_POINT };
@@ -689,14 +690,25 @@ fn pin_one(dir: &Path, follow: bool) -> std::result::Result<Pin, Blocked> {
         });
     }
     let pin = Pin { handle };
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    if unsafe { GetFileInformationByHandle(pin.handle, &mut info) } == 0 {
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            pin.handle,
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    if read == 0 {
         return Err(Blocked::Unreadable);
     }
-    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+    // Symbolic links and junctions stand for another place ("name
+    // surrogates"); OneDrive's placeholders and the like are folders too.
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+    if info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 && info.ReparseTag & NAME_SURROGATE != 0 {
         return Err(Blocked::Link);
     }
-    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+    if info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
         return Err(Blocked::Unreadable);
     }
     Ok(pin)
@@ -751,9 +763,27 @@ pub fn pin_parents(path: &Path) -> std::result::Result<Vec<Pin>, Blocked> {
 }
 
 /// Flushes a written file to the disk, so it outlasts a power cut that
-/// comes right after.
+/// comes right after. A read-only copy is made writable for that and put
+/// back.
 pub fn flush_file(path: &Path) -> std::io::Result<()> {
-    std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
+    let open = || std::fs::OpenOptions::new().write(true).open(path);
+    match open() {
+        Ok(file) => file.sync_all(),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            let perms = std::fs::metadata(path)?.permissions();
+            if !perms.readonly() {
+                return Err(e);
+            }
+            let mut writable = perms.clone();
+            #[allow(clippy::permissions_set_readonly_false)]
+            writable.set_readonly(false);
+            std::fs::set_permissions(path, writable)?;
+            let flushed = open().and_then(|file| file.sync_all());
+            let back = std::fs::set_permissions(path, perms);
+            flushed.and(back)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Total size of all files below `path`, skipping anything unreadable.
@@ -774,6 +804,21 @@ pub fn dir_size(path: &Path) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flushes_a_read_only_copy_and_keeps_it_read_only() {
+        let file = std::env::temp_dir().join(format!("uwiper-ro-{}.txt", std::process::id()));
+        std::fs::write(&file, b"keep").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms.clone()).unwrap();
+        flush_file(&file).unwrap();
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn a_missing_drive_says_nothing_about_a_file() {

@@ -442,12 +442,15 @@ fn same_entry(a: &str, b: &str) -> bool {
 /// is on the disk, so a half-done copy is never taken for a whole one; the
 /// original is removed only after that. `Ok(false)` means everything was
 /// copied but some originals were in use and stayed behind.
-pub fn move_path(from: &Path, to: &Path) -> Result<bool> {
+///
+/// `outside` is whichever of the two is outside quarantine – where it's
+/// removed from or put back to: nothing on the way there may be swapped
+/// for a link meanwhile.
+pub fn move_path(from: &Path, to: &Path, outside: &Path) -> Result<bool> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Nothing on the way may be swapped for a link while it's moved.
-    let _pins = crate::util::pin_parents(from).map_err(blocked)?;
+    let _pins = crate::util::pin_parents(outside).map_err(blocked)?;
     // Moving to another drive: ERROR_NOT_SAME_DEVICE on Windows, EXDEV elsewhere.
     const CROSS_DEVICE: i32 = if cfg!(windows) { 17 } else { 18 };
     match std::fs::rename(from, to) {
@@ -495,7 +498,7 @@ fn merge_into(from: &Path, to: &Path) -> Result<usize> {
         let dest = to.join(entry.file_name());
         match std::fs::symlink_metadata(&dest) {
             Err(_) => {
-                move_path(&entry.path(), &dest)?;
+                move_path(&entry.path(), &dest, &dest)?;
             }
             Ok(meta) if meta.is_dir() && entry.path().is_dir() => conflicts += merge_into(&entry.path(), &dest)?,
             Ok(_) => conflicts += 1,
@@ -583,7 +586,7 @@ pub fn back_up(target: &Target, dir: &Path) -> Result<Backup> {
 pub fn remove(target: &Target, backup: &Backup, dir: &Path) -> Result<Option<String>> {
     match (target, backup) {
         (Target::Path { path }, Backup::Moved { file }) => {
-            let complete = move_path(Path::new(path), &dir.join(file))?;
+            let complete = move_path(Path::new(path), &dir.join(file), Path::new(path))?;
             Ok((!complete).then(|| "Some files were in use and stayed behind".to_string()))
         }
         _ => imp::remove(target, backup),
@@ -623,7 +626,7 @@ pub fn with_gone(check: Option<String>, gone: &[String]) -> Option<String> {
     let mut check = check?;
     for path in gone {
         check.push_str("|gone:");
-        check.push_str(path);
+        check.push_str(&expand_env(path.trim().trim_matches('"')));
     }
     Some(check)
 }
@@ -674,7 +677,7 @@ pub fn restore(target: &Target, backup: &Backup, dir: &Path, partial: bool) -> R
                 return Err(Error::Other("The quarantined copy is missing".into()));
             }
             match std::fs::symlink_metadata(&original) {
-                Err(_) => move_path(&stored, &original).map(|_| ()),
+                Err(_) => move_path(&stored, &original, &original).map(|_| ()),
                 // Partly removed, or the app was installed again: fill in what's missing.
                 Ok(meta) if meta.is_dir() && stored.is_dir() => match merge_into(&stored, &original)? {
                     0 => Ok(()),
@@ -1108,6 +1111,21 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn restores_when_uwipers_own_folder_is_behind_a_link() {
+        let root = std::env::temp_dir().join(format!("uwiper-qlink-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("real/batch/000/App")).unwrap();
+        std::fs::write(root.join("real/batch/000/App/a.txt"), b"a").unwrap();
+        // Scoop's apps\uwiper\current, say.
+        std::os::unix::fs::symlink(root.join("real"), root.join("current")).unwrap();
+        let stored = root.join("current/batch/000/App");
+        let original = root.join("home/App");
+        assert!(move_path(&stored, &original, &original).unwrap());
+        assert!(original.join("a.txt").exists());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn a_folder_that_only_lost_files_is_unchanged() {
