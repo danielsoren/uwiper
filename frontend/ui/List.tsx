@@ -2,9 +2,9 @@ import type { ReactNode } from 'react';
 import { cn } from '../lib/cn';
 
 /** A card that holds rows separated by hairlines. */
-export function ListCard({ children, className }: { children: ReactNode; className?: string }) {
+export function ListCard({ children, className, id }: { children: ReactNode; className?: string; id?: string }) {
   return (
-    <div className={cn('overflow-hidden rounded-card border border-line-2 bg-fill [&>*+*]:border-t [&>*+*]:border-line', className)}>
+    <div id={id} className={cn('overflow-hidden rounded-card border border-line-2 bg-fill [&>*+*]:border-t [&>*+*]:border-line', className)}>
       {children}
     </div>
   );

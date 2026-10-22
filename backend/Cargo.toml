@@ -1,6 +1,6 @@
 [package]
 name = "uwiper"
-version = "0.3.0-beta.1"
+version = "0.4.0-beta.1"
 description = "Uninstall Windows apps completely and wipe every trace they leave"
 edition = "2021"
 license = "MIT"
@@ -34,9 +34,11 @@ winreg = "0.56"
 window-vibrancy = "0.8"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Globalization",
   "Win32_Graphics_Gdi",
   "Win32_Security",
   "Win32_Storage_FileSystem",
+  "Win32_System_Services",
   "Win32_System_Threading",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

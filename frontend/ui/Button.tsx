@@ -39,7 +39,8 @@ export function Button({ kind = 'secondary', icon, children, onClick, disabled, 
       className={cn(
         'inline-flex items-center justify-center gap-2 whitespace-nowrap border border-transparent font-medium',
         busy ? 'cursor-progress' : 'disabled:opacity-45',
-        small ? 'h-[30px] rounded-lg px-[11px] text-meta' : 'h-9 rounded-control px-3.5 text-body',
+        // A line box as tall as the font's own: a taller one gets its half-leading rounded and lifts the text.
+        small ? 'h-[30px] rounded-lg px-[11px] text-meta leading-[normal]' : 'h-9 rounded-control px-3.5 text-body leading-[normal]',
         KIND[kind],
         className,
       )}

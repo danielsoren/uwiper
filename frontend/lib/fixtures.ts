@@ -5,6 +5,7 @@ import type {
   AppRef,
   Batch,
   CleanupItem,
+  DriverItem,
   Environment,
   InstalledApp,
   Leftover,
@@ -86,8 +87,9 @@ let startup: StartupItem[] = ([
   { id: '3', name: 'RazerCentral', command: '"C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe" /silent', location: 'HKLM\\…\\Run (32-bit)', target: 'C:\\Program Files (x86)\\Razer\\Razer Services\\Razer Central\\RazerCentral.exe', fileExists: false, enabled: true, isWindows: false },
   { id: '4', name: 'Steam', command: '"C:\\Program Files (x86)\\Steam\\steam.exe" -silent', location: 'HKCU\\…\\Run', target: 'C:\\Program Files (x86)\\Steam\\steam.exe', fileExists: true, enabled: false, isWindows: false },
   { id: '5', name: 'SecurityHealth', command: '%windir%\\system32\\SecurityHealthSystray.exe', location: 'HKLM\\…\\Run', target: 'C:\\Windows\\system32\\SecurityHealthSystray.exe', fileExists: true, enabled: true, isWindows: true },
-] as Omit<StartupItem, 'removal'>[]).map((i) => ({
+] as Omit<StartupItem, 'removal' | 'needsAdmin'>[]).map((i) => ({
   ...i,
+  needsAdmin: i.location.startsWith('HKLM'),
   removal: { kind: 'registryValue', key: i.location.startsWith('HKLM') ? RUN.replace('HKCU\\Software', 'HKLM\\SOFTWARE\\WOW6432Node') : RUN, name: i.name },
 }));
 
@@ -104,6 +106,21 @@ let tasks: TaskItem[] = ([
   { name: 'GoogleUpdaterTaskSystem', folder: '', command: 'C:\\Program Files (x86)\\Google\\GoogleUpdater\\updater.exe', arguments: '--wake', binary: 'C:\\Program Files (x86)\\Google\\GoogleUpdater\\updater.exe', fileExists: true, enabled: true, triggers: 'On a schedule', isWindows: false },
   { name: 'Microsoft\\Windows\\Defrag\\ScheduledDefrag', folder: 'Microsoft\\Windows\\Defrag', command: '%windir%\\system32\\defrag.exe', arguments: '-c -h -o -$', binary: 'C:\\Windows\\system32\\defrag.exe', fileExists: true, enabled: true, triggers: 'On a schedule', isWindows: true },
 ] as Omit<TaskItem, 'removal'>[]).map((i) => ({ ...i, removal: { kind: 'task', path: `\\${i.name}` } }));
+
+const DRIVER = (id: string, inf: string, provider: string, cls: string, version: string, date: string, mb: number, device: string | null, inUse: boolean, old: boolean): DriverItem => ({
+  id, inf, provider, class: cls, version, date, sizeBytes: mb * MB, device, inUse, old, suggested: old && !inUse, removal: { kind: 'driver', inf: id },
+});
+
+let drivers: DriverItem[] = [
+  DRIVER('oem41.inf', 'iigd_dch.inf', 'Intel Corporation', 'Display adapters', '31.0.101.5333', '2024-02-09', 1180, 'Intel(R) UHD Graphics 770', true, false),
+  DRIVER('oem62.inf', 'nv_dispi.inf', 'NVIDIA', 'Display adapters', '32.0.15.6094', '2024-08-14', 1460, 'NVIDIA GeForce RTX 4070', true, false),
+  DRIVER('oem55.inf', 'nv_dispi.inf', 'NVIDIA', 'Display adapters', '31.0.15.5222', '2024-03-07', 1420, 'NVIDIA GeForce RTX 4070', false, true),
+  DRIVER('oem37.inf', 'nv_dispi.inf', 'NVIDIA', 'Display adapters', '31.0.15.3734', '2023-09-01', 1350, 'NVIDIA GeForce RTX 4070', false, true),
+  DRIVER('oem38.inf', 'nvhda.inf', 'NVIDIA', 'Sound, video and game controllers', '1.4.0.1', '2023-06-28', 2, 'NVIDIA High Definition Audio', true, false),
+  DRIVER('oem12.inf', 'hdxrt.inf', 'Realtek Semiconductor Corp.', 'Sound, video and game controllers', '6.0.9600.1', '2023-11-20', 74, 'Realtek(R) Audio', true, false),
+  DRIVER('oem9.inf', 'hdxrt.inf', 'Realtek Semiconductor Corp.', 'Sound, video and game controllers', '6.0.9235.1', '2021-08-11', 68, 'Realtek(R) Audio', false, true),
+  DRIVER('oem20.inf', 'hpcu270u.inf', 'HP', 'Printers', '61.270.1.24923', '2022-04-02', 36, null, false, false),
+];
 
 let settings: Settings = {
   storage: { oneFolder: true, quarantine: null, snapshots: null, logs: null, temp: null, logDays: 30 },
@@ -131,7 +148,7 @@ function storage(): StorageInfo {
 }
 
 // `?admin` in the URL previews the app with administrator rights.
-const environment: Environment = { elevated: new URLSearchParams(window.location.search).has('admin'), windows: true, material: 'none', home: HOME, version: '0.3.0-beta.1' };
+const environment: Environment = { elevated: new URLSearchParams(window.location.search).has('admin'), windows: true, material: 'none', home: HOME, version: '0.4.0-beta.1' };
 
 const DAY = 86_400;
 const now = () => Math.floor(Date.now() / 1000);
@@ -210,6 +227,7 @@ function remove(title: string, items: Removal[]): RemoveReport {
   startup = startup.filter((i) => !gone(i.removal));
   services = services.filter((i) => !gone(i.removal));
   tasks = tasks.filter((i) => !gone(i.removal));
+  drivers = drivers.filter((i) => !gone(i.removal));
   orphans = before.filter((l) => !gone(l.target));
   const id = `${now()}-${batches.length}`;
   if (settings.safety.quarantine) {
@@ -238,6 +256,24 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
       case 'list_startup': return startup;
       case 'list_services': return services;
       case 'list_tasks': return tasks;
+      case 'list_drivers': return drivers;
+      case 'set_startup_enabled': {
+        const item = startup.find((i) => i.id === args?.id);
+        if (item?.needsAdmin && !environment.elevated) throw new Error('Needs administrator rights – restart UWiper as administrator');
+        startup = startup.map((i) => (i.id === args?.id ? { ...i, enabled: args?.enabled as boolean } : i));
+        return null;
+      }
+      case 'set_service_start': {
+        if (!environment.elevated) throw new Error('Needs administrator rights – restart UWiper as administrator');
+        const start = args?.start as string;
+        services = services.map((i) => (i.name === args?.name ? { ...i, startType: start === 'delayed' ? 'automatic' : (start as ServiceItem['startType']), delayed: start === 'delayed' } : i));
+        return null;
+      }
+      case 'set_task_enabled': {
+        if (!environment.elevated) throw new Error('Needs administrator rights – restart UWiper as administrator');
+        tasks = tasks.map((i) => (i.name === args?.name ? { ...i, enabled: args?.enabled as boolean } : i));
+        return null;
+      }
       case 'get_settings': return settings;
       case 'save_settings': settings = args?.settings as Settings; return settings;
       case 'storage_info': return storage();

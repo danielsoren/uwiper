@@ -124,6 +124,7 @@ fn save(dir: &Path, batch: &Batch) -> Result<()> {
 fn removal_order(target: &Target) -> u8 {
     match target {
         Target::Service { .. } | Target::Task { .. } | Target::RegistryValue { .. } | Target::PathEntry { .. } => 0,
+        Target::Driver { .. } => 1,
         Target::RegistryKey { .. } => 1,
         Target::Path { .. } => 2,
     }
@@ -302,7 +303,7 @@ pub fn purge_expired(settings: &Settings) {
     }
 }
 
-fn settings_of(state: &State<'_, AppState>) -> Settings {
+pub(crate) fn settings_of(state: &State<'_, AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 

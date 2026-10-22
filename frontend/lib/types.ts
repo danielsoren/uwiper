@@ -28,7 +28,8 @@ export type Target =
   | { kind: 'registryValue'; key: string; name: string }
   | { kind: 'service'; name: string }
   | { kind: 'task'; path: string }
-  | { kind: 'pathEntry'; scope: 'user' | 'machine'; entry: string };
+  | { kind: 'pathEntry'; scope: 'user' | 'machine'; entry: string }
+  | { kind: 'driver'; inf: string };
 
 export type Confidence = 'high' | 'medium' | 'low';
 
@@ -128,8 +129,13 @@ export interface StartupItem {
   fileExists: boolean | null;
   enabled: boolean;
   isWindows: boolean;
+  /** Machine-wide entries need administrator rights to switch. */
+  needsAdmin: boolean;
   removal: Target;
 }
+
+/** What a service can be set to; boot and system start types are left alone. */
+export type ServiceStart = 'automatic' | 'delayed' | 'manual' | 'disabled';
 
 export interface ServiceItem {
   name: string;
@@ -152,6 +158,27 @@ export interface TaskItem {
   enabled: boolean;
   triggers: string;
   isWindows: boolean;
+  removal: Target;
+}
+
+export interface DriverItem {
+  /** Published name, such as oem12.inf. */
+  id: string;
+  /** The package's own INF name, such as nv_dispi.inf. */
+  inf: string | null;
+  provider: string;
+  class: string;
+  version: string | null;
+  /** yyyy-mm-dd */
+  date: string | null;
+  sizeBytes: number | null;
+  /** A device it drives – or, for an older version, one its newest version drives. */
+  device: string | null;
+  inUse: boolean;
+  /** A newer version of the same package is in the Driver Store. */
+  old: boolean;
+  /** An older version nothing uses while a device uses the newest: picked to start with. */
+  suggested: boolean;
   removal: Target;
 }
 
