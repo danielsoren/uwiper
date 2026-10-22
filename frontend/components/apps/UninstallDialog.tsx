@@ -35,6 +35,7 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
   const safety = useAppStore((s) => s.settings?.safety);
   const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
   const refresh = useAppStore((s) => s.refresh);
+  const afterChange = useAppStore((s) => s.afterChange);
   const go = useAppStore((s) => s.go);
 
   const elevated = !!env?.elevated;
@@ -111,7 +112,10 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
   };
 
   const close = () => {
-    if (step.name !== 'confirm') refresh('apps', 'quarantine', 'startup', 'services', 'tasks', 'storage');
+    if (step.name !== 'confirm') {
+      afterChange();
+      refresh('apps');
+    }
     onClose();
   };
 

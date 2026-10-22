@@ -10,7 +10,7 @@ React 19 + TypeScript, styled with Tailwind CSS 4, state in zustand. This folder
 | `pages/` | One component per sidebar section | Composes components; no reusable pieces here |
 | `components/<area>/` | App-specific pieces: `layout/`, `apps/`, `settings/`, `cleanup/`… | Knows about the store, API or app data |
 | `ui/` | Primitives, one per file: `Button`, `Checkbox`, `Dialog`, `Switch`, `Skeleton`, `ListRow`… | Knows nothing about UWiper; import from `ui/` (the barrel) |
-| `store/` | `useAppStore` (zustand), `hooks.ts`, `selectors.ts` | State and data loading only |
+| `store/` | `useAppStore` (zustand), `hooks.ts` | State and data loading only |
 | `lib/` | `api.ts` (Rust commands), `types.ts`, `format.ts`, `cn.ts`, sample data | No React components |
 
 If a new piece is generic enough to live in another app, it's a primitive (`ui/`). Otherwise it goes to `components/`, in a subfolder named after the area that uses it.

@@ -4,6 +4,7 @@ export { Button, type ButtonKind } from './Button';
 export { Card, GroupTitle } from './Card';
 export { Checkbox } from './Checkbox';
 export { Chip, Swatch } from './Chip';
+export { Collapse } from './Collapse';
 export { Dialog } from './Dialog';
 export { Empty } from './Empty';
 export { Field } from './Field';

@@ -24,6 +24,8 @@ pub enum Target {
     Service { name: String },
     /// A scheduled task, by its full path such as `\Vendor\Updater`.
     Task { path: String },
+    /// One folder in the user's ("user") or everyone's ("machine") PATH.
+    PathEntry { scope: String, entry: String },
 }
 
 /// What was kept so a removed target can be put back.
@@ -38,6 +40,8 @@ pub enum Backup {
     Value { vtype: u32, data: Vec<u8> },
     /// The task's XML definition.
     TaskXml { file: String },
+    /// Where a PATH entry was, so it goes back to the same place.
+    PathEntry { positions: Vec<usize> },
 }
 
 /// What the safety rules need to know.
@@ -140,12 +144,22 @@ impl Guard {
                 }
                 Ok(())
             }
+            Target::PathEntry { scope, entry } => {
+                if !matches!(scope.as_str(), "user" | "machine") || entry.trim().is_empty() || entry.contains(';') {
+                    return Err("Not a PATH entry".into());
+                }
+                let folder = expand_env(entry.trim().trim_matches('"'));
+                if is_within(&folder, &windows_dir()) {
+                    return Err("Part of Windows".into());
+                }
+                self.check_excluded(&folder)
+            }
         }
     }
 
     fn check_excluded(&self, path_or_key: &str) -> std::result::Result<(), String> {
         if self.is_excluded(path_or_key) {
-            return Err("On your \"Never touch\" list".into());
+            return Err("On your «Never touch» list".into());
         }
         Ok(())
     }
@@ -223,10 +237,13 @@ impl Guard {
         }
         let uninstall = r"microsoft\windows\currentversion\uninstall";
         let joined = rest.join("\\");
-        let is_uninstall_entry = joined.starts_with(&format!("{uninstall}\\")) && rest.len() == 5;
+        let app_paths = r"microsoft\windows\currentversion\app paths";
+        // An app's own entry in these Windows lists is fine to remove.
+        let is_app_entry = rest.len() == 5
+            && (joined.starts_with(&format!("{uninstall}\\")) || joined.starts_with(&format!("{app_paths}\\")));
         // Microsoft's keys are never removed, whatever the settings say.
         let system_vendor = vendor == "microsoft" || vendor == "windows";
-        if system_vendor && !is_uninstall_entry {
+        if system_vendor && !is_app_entry {
             return Err("Windows or Microsoft component".into());
         }
         self.check_excluded(key)
@@ -309,6 +326,7 @@ pub fn needs_admin(target: &Target) -> bool {
             split_key(key).is_none_or(|(hive, _)| hive == "HKLM")
         }
         Target::Service { .. } | Target::Task { .. } => true,
+        Target::PathEntry { scope, .. } => scope == "machine",
     }
 }
 
@@ -320,7 +338,69 @@ pub fn describe(target: &Target) -> String {
         Target::RegistryValue { key, name } => format!(r"{key}\{name}"),
         Target::Service { name } => format!("Service {name}"),
         Target::Task { path } => format!("Task {path}"),
+        Target::PathEntry { scope, entry } => {
+            format!("{} PATH: {entry}", if scope == "machine" { "System" } else { "User" })
+        }
     }
+}
+
+/// Splits PATH text into its entries. A quoted entry may hold a ";".
+pub fn split_path(text: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    for ch in text.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                parts.last_mut().unwrap().push(ch);
+            }
+            ';' if !quoted => parts.push(String::new()),
+            _ => parts.last_mut().unwrap().push(ch),
+        }
+    }
+    parts
+}
+
+/// The PATH text without `entry`, with the positions it had. `None` when
+/// it isn't there.
+pub fn without_entry(path: &str, entry: &str) -> Option<(String, Vec<usize>)> {
+    let parts = split_path(path);
+    let positions: Vec<usize> = (0..parts.len()).filter(|&i| same_entry(&parts[i], entry)).collect();
+    if positions.is_empty() {
+        return None;
+    }
+    let kept: Vec<&str> = parts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !positions.contains(i))
+        .map(|(_, p)| p.as_str())
+        .collect();
+    Some((kept.join(";"), positions))
+}
+
+/// The PATH text with `entry` back at its old positions (or at the end).
+/// `None` when it's there already.
+pub fn with_entry(path: &str, entry: &str, positions: &[usize]) -> Option<String> {
+    let mut parts = split_path(path);
+    if parts.iter().any(|p| same_entry(p, entry)) {
+        return None;
+    }
+    if parts.len() == 1 && parts[0].is_empty() {
+        parts.clear();
+    }
+    if positions.is_empty() {
+        parts.push(entry.to_string());
+    }
+    for &at in positions {
+        let at = at.min(parts.len());
+        parts.insert(at, entry.to_string());
+    }
+    Some(parts.join(";"))
+}
+
+fn same_entry(a: &str, b: &str) -> bool {
+    let clean = |s: &str| s.trim().trim_matches('"').trim_end_matches('\\').to_lowercase();
+    !a.trim().is_empty() && clean(a) == clean(b)
 }
 
 // ---------------------------------------------------------------------------
@@ -567,8 +647,67 @@ mod imp {
                 delete(target)?;
                 Ok((Backup::TaskXml { file: file.into() }, None))
             }
+            Target::PathEntry { scope, entry } => {
+                let (key, text, vtype) = read_path(scope)?;
+                let (next, positions) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
+                write_path(&key, &next, vtype)?;
+                Ok((Backup::PathEntry { positions }, None))
+            }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
         }
+    }
+
+    const MACHINE_ENV: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+    /// Reads PATH with its value type (it's usually REG_EXPAND_SZ).
+    fn read_path(scope: &str) -> Result<(RegKey, String, RegType)> {
+        let key = if scope == "machine" {
+            RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(MACHINE_ENV, KEY_READ | KEY_SET_VALUE)
+        } else {
+            RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_READ | KEY_SET_VALUE)
+        }
+        .map_err(registry_error)?;
+        let raw = key.get_raw_value("Path").map_err(registry_error)?;
+        let units: Vec<u16> = raw
+            .bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        // Characters that don't round-trip would be changed by a rewrite.
+        let text = String::from_utf16(&units)
+            .map_err(|_| Error::Other("PATH holds characters UWiper can't edit safely".into()))?
+            .trim_end_matches('\0')
+            .to_string();
+        Ok((key, text, raw.vtype))
+    }
+
+    fn write_path(key: &RegKey, text: &str, vtype: RegType) -> Result<()> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+        };
+        let bytes: Vec<u8> = text.encode_utf16().chain(Some(0)).flat_map(u16::to_le_bytes).collect();
+        key.set_raw_value(
+            "Path",
+            &RegValue {
+                bytes: bytes.into(),
+                vtype,
+            },
+        )
+        .map_err(registry_error)?;
+        // Tell running programs (Explorer, new terminals) that PATH changed.
+        let what: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                what.as_ptr() as isize,
+                SMTO_ABORTIFHUNG,
+                3000,
+                std::ptr::null_mut(),
+            );
+        }
+        Ok(())
     }
 
     pub fn delete(target: &Target) -> Result<()> {
@@ -599,6 +738,11 @@ mod imp {
                 run_tool("sc.exe", &["delete", name]).map(|_| ())
             }
             Target::Task { path } => run_tool("schtasks.exe", &["/Delete", "/TN", path, "/F"]).map(|_| ()),
+            Target::PathEntry { scope, entry } => {
+                let (key, text, vtype) = read_path(scope)?;
+                let (next, _) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
+                write_path(&key, &next, vtype)
+            }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
         }
     }
@@ -639,6 +783,13 @@ mod imp {
                     &["/Create", "/TN", path, "/XML", &xml.to_string_lossy(), "/F"],
                 )
                 .map(|_| ())
+            }
+            (Target::PathEntry { scope, entry }, Backup::PathEntry { positions }) => {
+                let (key, text, vtype) = read_path(scope)?;
+                match with_entry(&text, entry, positions) {
+                    Some(next) => write_path(&key, &next, vtype),
+                    None => Ok(()),
+                }
             }
             _ => Err(Error::Other("This backup doesn't match the item".into())),
         }
@@ -730,6 +881,42 @@ mod tests {
     }
 
     #[test]
+    fn edits_path_entries() {
+        let path = r"C:\Windows;C:\Gone\bin\;%USERPROFILE%\tools;C:\gone\bin";
+        let (without, positions) = without_entry(path, r"c:\gone\BIN").unwrap();
+        assert_eq!(without, r"C:\Windows;%USERPROFILE%\tools");
+        assert_eq!(positions, vec![1, 3]);
+        assert_eq!(without_entry(path, r"C:\Other"), None);
+        assert_eq!(
+            with_entry(&without, r"C:\Gone\bin", &positions).as_deref(),
+            Some(r"C:\Windows;C:\Gone\bin;%USERPROFILE%\tools;C:\Gone\bin"),
+            "back where it was"
+        );
+        assert_eq!(with_entry("", r"C:\x", &[]).as_deref(), Some(r"C:\x"));
+        assert_eq!(with_entry(path, r"C:\Gone\bin", &[]), None);
+        // A quoted entry keeps its ";".
+        let quoted = r#"C:\a;"C:\b;c";C:\d"#;
+        assert_eq!(split_path(quoted), vec![r"C:\a", r#""C:\b;c""#, r"C:\d"]);
+        assert_eq!(
+            without_entry(quoted, r"C:\b;c").map(|r| r.0).as_deref(),
+            Some(r"C:\a;C:\d")
+        );
+        let g = guard();
+        assert!(g
+            .check(&Target::PathEntry {
+                scope: "user".into(),
+                entry: "a;b".into()
+            })
+            .is_err());
+        assert!(g
+            .check(&Target::PathEntry {
+                scope: "user".into(),
+                entry: r"D:\Games\bin".into()
+            })
+            .is_err());
+    }
+
+    #[test]
     fn allows_vendor_keys_only() {
         let g = guard();
         assert!(g.check(&key(r"HKCU\Software\Vendor\App")).is_ok());
@@ -747,6 +934,11 @@ mod tests {
             .is_ok());
         assert!(g
             .check(&key(r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"))
+            .is_err());
+        let app_path = r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths\gone.exe";
+        assert!(g.check(&key(app_path)).is_ok());
+        assert!(g
+            .check(&key(r"HKCU\Software\Microsoft\Windows\CurrentVersion\App Paths"))
             .is_err());
     }
 

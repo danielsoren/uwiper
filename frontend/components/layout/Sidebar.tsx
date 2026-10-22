@@ -2,7 +2,6 @@ import type { ReactNode } from 'react';
 import { inTauri } from '../../lib/api';
 import { cn } from '../../lib/cn';
 import { formatBytes } from '../../lib/format';
-import { brokenEntries } from '../../store/selectors';
 import { useAppStore, type Page } from '../../store/useAppStore';
 import { Icon, type IconName } from '../../ui';
 import { Logo } from '../brand/Logo';
@@ -62,19 +61,18 @@ export function Sidebar() {
   const env = useAppStore((s) => s.env);
   const apps = useAppStore((s) => s.res.apps.data);
   const cleanup = useAppStore((s) => s.res.cleanup.data);
-  const startup = useAppStore((s) => s.res.startup.data);
-  const services = useAppStore((s) => s.res.services.data);
-  const tasks = useAppStore((s) => s.res.tasks.data);
+  const orphans = useAppStore((s) => s.res.orphans.data);
   const batches = useAppStore((s) => s.res.quarantine.data);
   const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
 
-  const broken = brokenEntries(startup, services, tasks);
+  // Only the finds UWiper is fairly sure about; guesses don't make a badge.
+  const leftovers = (orphans?.items ?? []).filter((l) => l.confidence !== 'low').length;
   const cleanupBytes = (cleanup ?? []).filter((i) => i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
 
   const cleanUp: NavItem[] = [
     { page: 'overview', label: 'Overview', icon: 'home' },
     { page: 'apps', label: 'Apps', icon: 'apps', badge: apps ? String(apps.length) : undefined },
-    { page: 'leftovers', label: 'Leftovers', icon: 'traces', badge: broken.total ? String(broken.total) : undefined },
+    { page: 'leftovers', label: 'Leftovers', icon: 'traces', badge: leftovers ? String(leftovers) : undefined },
     { page: 'cleanup', label: 'Cleanup', icon: 'sparkle', badge: cleanup ? formatBytes(cleanupBytes) : undefined },
   ];
   const manage: NavItem[] = [

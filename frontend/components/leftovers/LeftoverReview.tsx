@@ -1,15 +1,19 @@
 import { cn } from '../../lib/cn';
-import { formatBytes } from '../../lib/format';
+import { ago, formatBytes } from '../../lib/format';
 import type { Confidence, Leftover } from '../../lib/types';
 import { Checkbox, Icon, Pill, type IconName, type PillTone } from '../../ui';
 
 const GROUPS: { title: string; kinds: Leftover['kind'][] }[] = [
+  { title: 'Apps that are gone', kinds: ['app'] },
+  { title: 'Services, tasks & startup', kinds: ['service', 'task', 'startup'] },
   { title: 'Files & folders', kinds: ['folder', 'file', 'shortcut'] },
   { title: 'Registry', kinds: ['registry'] },
-  { title: 'Services, tasks & startup', kinds: ['service', 'task', 'startup'] },
+  { title: 'PATH entries', kinds: ['environment'] },
 ];
 
 const KIND_ICON: Record<Leftover['kind'], IconName> = {
+  app: 'apps',
+  environment: 'code',
   folder: 'folder',
   file: 'file',
   shortcut: 'link',
@@ -95,7 +99,10 @@ export function LeftoverReview({
                     <div title={l.label} className="truncate font-mono text-small text-fg-path">
                       {l.label}
                     </div>
-                    <div className="mt-0.5 truncate text-small text-fg-3">{l.reason}</div>
+                    <div className="mt-0.5 truncate text-small text-fg-3">
+                      {l.reason}
+                      {l.modified && ` · changed ${ago(l.modified)}`}
+                    </div>
                   </div>
                   {!allowed && <Pill tone="warn">Needs admin</Pill>}
                   <span title={CONFIDENCE[l.confidence].hint}>

@@ -8,6 +8,7 @@ import type {
   Environment,
   InstalledApp,
   Leftover,
+  OrphanScan,
   Removal,
   RemoveReport,
   ServiceItem,
@@ -64,15 +65,18 @@ let apps: InstalledApp[] = [
 ];
 
 let cleanup: CleanupItem[] = [
-  { id: 'temp', group: 'windows', name: 'Temporary files', description: '%TEMP% and Windows\\Temp', defaultOn: true, sizeBytes: 1340 * MB, fileCount: 18211, paths: ['C:\\Users\\you\\AppData\\Local\\Temp', 'C:\\Windows\\Temp'] },
-  { id: 'windows-update', group: 'windows', name: 'Windows Update cache', description: 'Downloaded packages for updates that are already installed', defaultOn: true, sizeBytes: 860 * MB, fileCount: 412, paths: ['C:\\Windows\\SoftwareDistribution\\Download'] },
-  { id: 'crash-dumps', group: 'windows', name: 'Crash reports & memory dumps', description: 'Windows Error Reporting, minidumps', defaultOn: true, sizeBytes: 412 * MB, fileCount: 37, paths: ['C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive'] },
-  { id: 'thumbnails', group: 'windows', name: 'Thumbnail cache', description: 'Explorer previews, rebuilt on demand', defaultOn: true, sizeBytes: 96 * MB, fileCount: 12, paths: ['C:\\Users\\you\\AppData\\Local\\Microsoft\\Windows\\Explorer\\thumbcache_256.db'] },
-  { id: 'chrome', group: 'browsers', name: 'Google Chrome – cache', description: 'Cookies, passwords and history are never touched', defaultOn: true, sizeBytes: 420 * MB, fileCount: 5120, paths: ['C:\\Users\\you\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache'] },
-  { id: 'edge', group: 'browsers', name: 'Microsoft Edge – cache', description: 'Cookies, passwords and history are never touched', defaultOn: true, sizeBytes: 180 * MB, fileCount: 2210, paths: ['C:\\Users\\you\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache'] },
-  { id: 'npm', group: 'developer', name: 'npm cache', description: "Downloaded again the next time it's needed", defaultOn: false, sizeBytes: 1120 * MB, fileCount: 40210, paths: ['C:\\Users\\you\\AppData\\Local\\npm-cache'] },
-  { id: 'cargo', group: 'developer', name: 'Cargo registry cache', description: 'Downloaded .crate archives', defaultOn: false, sizeBytes: 380 * MB, fileCount: 2311, paths: ['C:\\Users\\you\\.cargo\\registry\\cache'] },
-  { id: 'discord', group: 'apps', name: 'Discord – cache', description: 'Images and media from chats', defaultOn: true, sizeBytes: 210 * MB, fileCount: 3011, paths: ['C:\\Users\\you\\AppData\\Roaming\\discord\\Cache'] },
+  { id: 'temp', group: 'windows', name: 'Temporary files', description: '%TEMP% and Windows\\Temp', defaultOn: true, detected: false, sizeBytes: 1340 * MB, fileCount: 18211, paths: ['C:\\Users\\you\\AppData\\Local\\Temp', 'C:\\Windows\\Temp'] },
+  { id: 'windows-update', group: 'windows', name: 'Windows Update cache', description: 'Downloaded packages for updates that are already installed', defaultOn: true, detected: false, sizeBytes: 860 * MB, fileCount: 412, paths: ['C:\\Windows\\SoftwareDistribution\\Download'] },
+  { id: 'crash-dumps', group: 'windows', name: 'Crash reports & memory dumps', description: 'Windows Error Reporting, minidumps', defaultOn: true, detected: false, sizeBytes: 412 * MB, fileCount: 37, paths: ['C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive'] },
+  { id: 'thumbnails', group: 'windows', name: 'Thumbnail cache', description: 'Explorer previews, rebuilt on demand', defaultOn: true, detected: false, sizeBytes: 96 * MB, fileCount: 12, paths: ['C:\\Users\\you\\AppData\\Local\\Microsoft\\Windows\\Explorer\\thumbcache_256.db'] },
+  { id: 'chrome', group: 'browsers', name: 'Google Chrome – cache', description: 'Cookies, passwords and history are never touched', defaultOn: true, detected: false, sizeBytes: 420 * MB, fileCount: 5120, paths: ['C:\\Users\\you\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache'] },
+  { id: 'edge', group: 'browsers', name: 'Microsoft Edge – cache', description: 'Cookies, passwords and history are never touched', defaultOn: true, detected: false, sizeBytes: 180 * MB, fileCount: 2210, paths: ['C:\\Users\\you\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache'] },
+  { id: 'npm', group: 'developer', name: 'npm cache', description: "Downloaded again the next time it's needed", defaultOn: false, detected: false, sizeBytes: 1120 * MB, fileCount: 40210, paths: ['C:\\Users\\you\\AppData\\Local\\npm-cache'] },
+  { id: 'cargo', group: 'developer', name: 'Cargo registry cache', description: 'Downloaded .crate archives', defaultOn: false, detected: false, sizeBytes: 380 * MB, fileCount: 2311, paths: ['C:\\Users\\you\\.cargo\\registry\\cache'] },
+  { id: 'discord', group: 'apps', name: 'Discord – cache', description: 'Images and media from chats', defaultOn: true, detected: false, sizeBytes: 210 * MB, fileCount: 3011, paths: ['C:\\Users\\you\\AppData\\Roaming\\discord\\Cache'] },
+  { id: 'telegram', group: 'apps', name: 'Telegram – cache', description: 'Images and media from chats, downloaded again when opened', defaultOn: true, detected: false, sizeBytes: 1830 * MB, fileCount: 9120, paths: ['C:\\Users\\you\\AppData\\Roaming\\Telegram Desktop\\tdata\\user_data\\media_cache'] },
+  { id: 'found:figma', group: 'apps', name: 'Figma – cache', description: 'Found by folder name: Cache, Code Cache, GPUCache', defaultOn: true, detected: true, sizeBytes: 164 * MB, fileCount: 811, paths: ['C:\\Users\\you\\AppData\\Roaming\\Figma\\Cache', 'C:\\Users\\you\\AppData\\Roaming\\Figma\\Code Cache'] },
+  { id: 'recycle-bin', group: 'windows', name: 'Recycle Bin', description: "Files you deleted – emptying it can't be undone", defaultOn: false, detected: false, sizeBytes: 2210 * MB, fileCount: 318, paths: [] },
 ];
 
 const RUN = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
@@ -110,7 +114,6 @@ let settings: Settings = {
     exclusions: ['D:\\Games'],
   },
   appearance: { accent: '#0071E3', windowButtons: 'windows', translucent: true },
-  footprint: { startWithWindows: false },
 };
 
 function storage(): StorageInfo {
@@ -128,7 +131,7 @@ function storage(): StorageInfo {
 }
 
 // `?admin` in the URL previews the app with administrator rights.
-const environment: Environment = { elevated: new URLSearchParams(window.location.search).has('admin'), windows: true, material: 'none', home: HOME, version: '0.2.0-beta.1' };
+const environment: Environment = { elevated: new URLSearchParams(window.location.search).has('admin'), windows: true, material: 'none', home: HOME, version: '0.3.0-beta.1' };
 
 const DAY = 86_400;
 const now = () => Math.floor(Date.now() / 1000);
@@ -151,7 +154,7 @@ let batches: Batch[] = [
 function leftoversOf(app: AppRef): Leftover[] {
   const name = app.name.replace(/\s*[\d.]+.*$/, '') || app.name;
   const item = (kind: Leftover['kind'], target: Leftover['target'], label: string, reason: string, confidence: Leftover['confidence'], sizeBytes: number | null): Leftover =>
-    ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes, needsAdmin: !label.startsWith('C:\\Users') && !label.startsWith('HKCU'), target });
+    ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes, modified: null, needsAdmin: !label.startsWith('C:\\Users') && !label.startsWith('HKCU'), target });
   const path = (p: string, reason: string, confidence: Leftover['confidence'], mb: number, kind: Leftover['kind'] = 'folder') =>
     item(kind, { kind: 'path', path: p }, p, reason, confidence, mb * MB);
   const out = [
@@ -166,13 +169,48 @@ function leftoversOf(app: AppRef): Leftover[] {
   return out.filter((l, i) => out.findIndex((o) => o.id === l.id) === i);
 }
 
+const YEAR = 365 * DAY;
+
+/** A sample of what the orphan scan finds on a PC that has seen some apps come and go. */
+function orphanSample(): Leftover[] {
+  const it = (
+    kind: Leftover['kind'],
+    target: Leftover['target'],
+    label: string,
+    reason: string,
+    confidence: Leftover['confidence'],
+    sizeMb: number | null,
+    age: number | null,
+    needsAdmin = false,
+  ): Leftover => ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes: sizeMb === null ? null : sizeMb * MB, modified: age === null ? null : now() - age, needsAdmin, target });
+  const path = (p: string) => ({ kind: 'path' as const, path: p });
+  const key = (k: string) => ({ kind: 'registryKey' as const, key: k });
+  const uninstall = 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OldGame';
+  return [
+    it('app', key(uninstall), uninstall, '«Old Game» is listed as installed, but its uninstaller and folder are gone', 'high', null, null, true),
+    it('startup', startup.find((i) => i.name === 'RazerCentral')!.removal, 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\RazerCentral', '«RazerCentral» starts a program that no longer exists', 'high', null, null, true),
+    it('service', { kind: 'service', name: 'AdobeARMservice' }, 'Service AdobeARMservice', 'Service «Adobe Acrobat Update Service» runs a program that no longer exists', 'high', null, null, true),
+    it('shortcut', path('C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk'), 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk', 'Points to C:\\Program Files (x86)\\Razer\\Synapse3\\Razer Synapse.exe, which no longer exists', 'high', 0.002, 2 * YEAR, true),
+    it('environment', { kind: 'pathEntry', scope: 'user', entry: 'C:\\Tools\\old-sdk\\bin' }, 'User PATH: C:\\Tools\\old-sdk\\bin', "In your PATH, but the folder doesn't exist – some tools create it on first use", 'low', null, null),
+    it('folder', path('C:\\ProgramData\\Razer'), 'C:\\ProgramData\\Razer', 'Empty folder that no installed app uses', 'medium', 0, 2 * YEAR, true),
+    it('registry', key('HKCU\\Software\\Razer'), 'HKCU\\Software\\Razer', 'Empty settings key that no installed app uses', 'medium', null, 2 * YEAR),
+    it('folder', path('C:\\Users\\you\\AppData\\Roaming\\Ravenswatch'), 'C:\\Users\\you\\AppData\\Roaming\\Ravenswatch', 'No installed app matches this folder', 'low', 124, 1.4 * YEAR),
+    it('folder', path('C:\\Program Files\\OldTool'), 'C:\\Program Files\\OldTool', 'No installed app is registered for this folder – it may be a portable app', 'low', 38, 3 * YEAR, true),
+    it('registry', key('HKCU\\Software\\Passtech Games'), 'HKCU\\Software\\Passtech Games', 'Settings of an app that isn\'t installed', 'low', null, 1.4 * YEAR),
+  ];
+}
+
+let orphans: Leftover[] | null = null;
+
 const sameTarget = (a: Removal['target'], b: Removal['target']) => JSON.stringify(a) === JSON.stringify(b);
 
 function remove(title: string, items: Removal[]): RemoveReport {
   const gone = (t: Removal['target']) => items.some((i) => sameTarget(i.target, t));
+  const before = orphans ?? orphanSample();
   startup = startup.filter((i) => !gone(i.removal));
   services = services.filter((i) => !gone(i.removal));
   tasks = tasks.filter((i) => !gone(i.removal));
+  orphans = before.filter((l) => !gone(l.target));
   const id = `${now()}-${batches.length}`;
   if (settings.safety.quarantine) {
     batches = [{ id, title, createdAt: now(), items: items.map((i) => ({ label: i.label, target: i.target, sizeBytes: i.sizeBytes ?? 0, note: null })) }, ...batches];
@@ -190,7 +228,7 @@ const extraDelay = Number(new URLSearchParams(window.location.search).get('delay
 
 export async function fixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const atStart = command === 'environment' || command === 'get_settings';
-  const slow = command === 'scan_cleanup' || command === 'scan_leftovers' || command === 'create_restore_point' || command === 'clean_caches';
+  const slow = ['scan_cleanup', 'scan_leftovers', 'scan_orphans', 'create_restore_point', 'clean_caches'].includes(command);
   await delay(atStart ? 50 : (slow ? 1200 : 250) + extraDelay);
   const result = ((): unknown => {
     switch (command) {
@@ -211,6 +249,7 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
         return done;
       }
       case 'scan_leftovers': return leftoversOf(args?.app as AppRef);
+      case 'scan_orphans': return { items: (orphans ??= orphanSample()), needsAdmin: !environment.elevated } satisfies OrphanScan;
       case 'remove_items': return remove(args?.title as string, args?.items as Removal[]);
       case 'list_quarantine': return batches;
       case 'restore_batch': {

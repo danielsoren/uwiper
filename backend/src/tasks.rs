@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::error::{blocking, Error, Result};
 use crate::targets::Target;
-use crate::util::{expand_env, file_state, resolve_executable};
+use crate::util::{expand_env, program_state, resolve_executable, uses_per_user_vars};
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -17,7 +17,7 @@ pub struct TaskItem {
     command: Option<String>,
     arguments: Option<String>,
     pub(crate) binary: Option<String>,
-    file_exists: Option<bool>,
+    pub(crate) file_exists: Option<bool>,
     enabled: bool,
     triggers: String,
     pub(crate) is_windows: bool,
@@ -142,7 +142,12 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
     let binary = command.as_deref().and_then(resolve_executable);
     Some(TaskItem {
         is_windows: name.starts_with("Microsoft\\"),
-        file_exists: binary.as_deref().and_then(file_state),
+        // A task may run as another user, whose profile a per-user path points into.
+        file_exists: if command.as_deref().is_some_and(uses_per_user_vars) {
+            None
+        } else {
+            binary.as_deref().and_then(program_state)
+        },
         binary,
         command,
         arguments,

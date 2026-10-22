@@ -14,7 +14,7 @@ use tauri::State;
 use crate::error::{blocking, Result};
 use crate::settings::Settings;
 use crate::targets::{self, Guard, Target};
-use crate::util::{canonical, dir_size, expand_env, is_within, norm_path, parallel_map};
+use crate::util::{canonical, dir_stats, expand_env, is_within, norm_path, parallel_map};
 use crate::{apps, AppState};
 
 /// The app as the UI knew it before uninstalling.
@@ -38,6 +38,8 @@ pub struct Leftover {
     /// "high", "medium" or "low"
     confidence: &'static str,
     size_bytes: Option<u64>,
+    /// When it last changed (Unix time): for files, the newest file inside.
+    modified: Option<u64>,
     needs_admin: bool,
     target: Target,
 }
@@ -113,7 +115,7 @@ pub fn clean_publisher(publisher: &str) -> String {
 }
 
 /// Folder and key names that are too general to tie to one app.
-const GENERIC: [&str; 34] = [
+pub(crate) const GENERIC: [&str; 34] = [
     "app",
     "apps",
     "application",
@@ -220,7 +222,7 @@ impl Names {
 // ---------------------------------------------------------------------------
 // Collecting
 
-struct Found {
+pub(crate) struct Found {
     guard: Guard,
     /// The app still looks installed (the uninstaller may have been cancelled):
     /// every find is one level less sure.
@@ -232,7 +234,28 @@ struct Found {
 }
 
 impl Found {
-    fn add(&mut self, kind: &'static str, target: Target, reason: &str, confidence: &'static str) {
+    pub(crate) fn new(guard: Guard, other_folders: Vec<String>, downgrade: bool) -> Self {
+        Found {
+            guard,
+            downgrade,
+            other_folders,
+            items: Vec::new(),
+            seen: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn add(&mut self, kind: &'static str, target: Target, reason: &str, confidence: &'static str) {
+        self.add_dated(kind, target, reason, confidence, None);
+    }
+
+    pub(crate) fn add_dated(
+        &mut self,
+        kind: &'static str,
+        target: Target,
+        reason: &str,
+        confidence: &'static str,
+        modified: Option<u64>,
+    ) {
         let confidence = match (self.downgrade, confidence) {
             (true, "high") => "medium",
             (true, _) => "low",
@@ -258,12 +281,13 @@ impl Found {
             reason: reason.into(),
             confidence,
             size_bytes: None,
+            modified,
             needs_admin,
             target,
         });
     }
 
-    fn add_path(&mut self, path: &Path, reason: &str, confidence: &'static str) {
+    pub(crate) fn add_path(&mut self, path: &Path, reason: &str, confidence: &'static str) {
         let kind = if path.is_dir() {
             "folder"
         } else if path
@@ -286,7 +310,7 @@ impl Found {
 
     /// Drops finds that sit inside a folder that is already on the list,
     /// measures folders and puts the surest finds first.
-    fn finish(mut self) -> Vec<Leftover> {
+    pub(crate) fn finish(mut self) -> Vec<Leftover> {
         let folders: Vec<String> = self
             .items
             .iter()
@@ -297,16 +321,16 @@ impl Found {
             Target::Path { path } => !folders.iter().any(|f| f != path && is_within(path, f)),
             _ => true,
         });
-        let sizes = parallel_map(&self.items, |item| match &item.target {
-            Target::Path { path } => Some(match std::fs::metadata(path) {
-                Ok(meta) if meta.is_dir() => dir_size(Path::new(path)).0,
-                Ok(meta) => meta.len(),
-                Err(_) => 0,
-            }),
-            _ => None,
+        let stats = parallel_map(&self.items, |item| match &item.target {
+            Target::Path { path } => {
+                let (bytes, _, newest) = dir_stats(Path::new(path));
+                (Some(bytes), newest)
+            }
+            _ => (None, None),
         });
-        for (item, size) in self.items.iter_mut().zip(sizes) {
+        for (item, (size, newest)) in self.items.iter_mut().zip(stats) {
             item.size_bytes = size;
+            item.modified = item.modified.or(newest);
         }
         let rank = |c: &str| match c {
             "high" => 0,
@@ -319,13 +343,13 @@ impl Found {
     }
 }
 
-fn subdirs(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn subdirs(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|it| it.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect())
         .unwrap_or_default()
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
@@ -381,7 +405,7 @@ fn data_roots(deep: bool) -> Vec<(PathBuf, &'static str)> {
         .collect()
 }
 
-fn shortcut_dirs() -> Vec<(PathBuf, usize)> {
+pub(crate) fn shortcut_dirs() -> Vec<(PathBuf, usize)> {
     [
         (r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 2),
         (r"%ProgramData%\Microsoft\Windows\Start Menu\Programs", 2),
@@ -440,13 +464,7 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
             .is_some_and(|dir| is_within(&canonical(path), dir))
     };
 
-    let mut found = Found {
-        downgrade: imp::key_exists(&app.id),
-        guard,
-        other_folders,
-        items: Vec::new(),
-        seen: HashSet::new(),
-    };
+    let mut found = Found::new(guard, other_folders, imp::key_exists(&app.id));
     let look = &settings.scan.look_in;
     let quick = settings.scan.depth == "quick";
     let deep = settings.scan.depth == "deep";
@@ -572,12 +590,24 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
         }
     }
 
+    if look.path {
+        for (scope, entry) in crate::orphans::path_entries() {
+            if inside_install(&expand_env(&entry)) {
+                let target = Target::PathEntry {
+                    scope: scope.into(),
+                    entry,
+                };
+                found.add("environment", target, "In PATH, pointing into the app's folder", "high");
+            }
+        }
+    }
+
     if look.services {
         for service in crate::services::list().unwrap_or_default() {
             let program = service.binary.as_deref().unwrap_or_default();
             if !service.is_windows && inside_install(program) && !found.guard.is_excluded(program) {
                 let reason = format!(
-                    "Service \"{}\" runs a program from the app's folder",
+                    "Service «{}» runs a program from the app's folder",
                     service.display_name
                 );
                 found.add("service", service.removal, &reason, "high");

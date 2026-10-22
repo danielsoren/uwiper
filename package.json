@@ -1,7 +1,7 @@
 {
   "name": "uwiper",
   "private": true,
-  "version": "0.2.0-beta.1",
+  "version": "0.3.0-beta.1",
   "description": "Uninstall Windows apps completely and wipe every trace they leave – portable, quarantine first",
   "keywords": [
     "windows",
@@ -26,6 +26,7 @@
     "url": "https://github.com/danielsoren/uwiper/issues"
   },
   "author": "danielsoren",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

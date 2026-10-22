@@ -5,7 +5,6 @@ use serde::Serialize;
 use tauri::{AppHandle, State, WebviewWindow};
 
 use crate::error::{Error, Result};
-use crate::settings::Footprint;
 use crate::{paths, AppState};
 
 #[derive(Serialize)]
@@ -146,29 +145,28 @@ pub fn reveal_path(path: String) -> Result<()> {
     Err(Error::Unsupported)
 }
 
-const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_VALUE: &str = "UWiper";
+/// Earlier versions could add UWiper to startup. That option is gone, so
+/// an entry pointing at this exe is removed – UWiper keeps nothing outside
+/// its folder.
+pub fn remove_old_autostart() {
+    #[cfg(windows)]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+        use winreg::RegKey;
 
-/// Creates or removes the entries listed under "Outside the UWiper folder".
-#[cfg(windows)]
-pub fn apply_footprint(footprint: &Footprint) -> Result<()> {
-    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-
-    let (run, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_KEY)?;
-    if footprint.start_with_windows {
-        let exe = std::env::current_exe()?;
-        run.set_value(RUN_VALUE, &format!("\"{}\"", exe.display()))?;
-    } else {
-        match run.delete_value(RUN_VALUE) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
+        let run = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            KEY_READ | KEY_SET_VALUE,
+        );
+        let (Ok(run), Ok(exe)) = (run, std::env::current_exe()) else {
+            return;
+        };
+        let ours = run.get_value::<String, _>("UWiper").is_ok_and(|command| {
+            crate::util::command_executable(&command)
+                .is_some_and(|p| crate::util::is_within(&p, &exe.to_string_lossy()))
+        });
+        if ours {
+            let _ = run.delete_value("UWiper");
         }
     }
-    Ok(())
-}
-
-#[cfg(not(windows))]
-pub fn apply_footprint(footprint: &Footprint) -> Result<()> {
-    let _ = (footprint, RUN_KEY, RUN_VALUE);
-    Ok(())
 }

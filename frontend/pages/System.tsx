@@ -44,7 +44,7 @@ const START: Record<ServiceItem['startType'], string> = {
 
 const HINT: Record<Exclude<Tab, 'drivers'>, string> = {
   startup: 'Programs that start when you sign in, from the Run keys and Startup folders. Enabled/disabled is the same switch Task Manager uses.',
-  services: 'Services registered on this PC. “File missing” means the service belongs to an app that is already gone.',
+  services: 'Services registered on this PC. «File missing» means the service belongs to an app that is already gone.',
   tasks: 'Scheduled tasks. Tasks that run a missing file are leftovers from removed apps.',
 };
 
@@ -100,7 +100,8 @@ export function System() {
     .filter((r) => !(hideWindows && r.windows) && (!problemsOnly || r.problem))
     .sort((a, b) => Number(b.problem) - Number(a.problem));
 
-  const countOf = (list: { isWindows: boolean }[] | null) => (list ? list.filter((i) => !(hideWindows && i.isWindows)).length : '…');
+  const countOf = (r: { data: { isWindows: boolean }[] | null; error: string | null }) =>
+    r.data ? <SegmentCount>{r.data.filter((i) => !(hideWindows && i.isWindows)).length}</SegmentCount> : !r.error && <SegmentCount>…</SegmentCount>;
   const resource = tab === 'startup' ? startup : tab === 'services' ? services : tab === 'tasks' ? tasks : null;
 
   return (
@@ -112,9 +113,9 @@ export function System() {
           value={tab}
           onChange={setTab}
           options={[
-            { value: 'startup', label: <>Startup <SegmentCount>{countOf(startup.data)}</SegmentCount></> },
-            { value: 'services', label: <>Services <SegmentCount>{countOf(services.data)}</SegmentCount></> },
-            { value: 'tasks', label: <>Scheduled tasks <SegmentCount>{countOf(tasks.data)}</SegmentCount></> },
+            { value: 'startup', label: <>Startup {countOf(startup)}</> },
+            { value: 'services', label: <>Services {countOf(services)}</> },
+            { value: 'tasks', label: <>Scheduled tasks {countOf(tasks)}</> },
             { value: 'drivers', label: 'Drivers' },
           ]}
         />
@@ -131,7 +132,7 @@ export function System() {
 
       <PageBody>
         {tab === 'drivers' || !resource ? (
-          <Empty icon="cpu" title="Driver packages arrive in v0.3">
+          <Empty icon="cpu" title="Driver packages arrive in v0.4">
             UWiper will list the third-party driver packages in the Driver Store and show which ones no device uses anymore – old
             GPU drivers alone can take gigabytes.
           </Empty>
@@ -164,10 +165,15 @@ export function System() {
                     <span title={r.path ?? undefined} className="min-w-0 flex-[1_1_220px] truncate font-mono text-[11.5px] text-fg-3">
                       {r.path}
                     </span>
-                    <Pill tone={r.tone}>{r.pill}</Pill>
-                    {r.path && !r.problem && r.path.includes('\\') && (
-                      <Button small kind="ghost" icon="folder" ariaLabel={`Show ${r.name} in Explorer`} onClick={() => attempt(() => api.revealPath(r.path!))} />
-                    )}
+                    {/* Fixed width, so the path column lines up across rows. */}
+                    <span className="flex w-[148px] flex-none items-center justify-end gap-1.5">
+                      <Pill tone={r.tone}>{r.pill}</Pill>
+                      {r.path && !r.problem && r.path.includes('\\') ? (
+                        <Button small kind="ghost" icon="folder" ariaLabel={`Show ${r.name} in Explorer`} onClick={() => attempt(() => api.revealPath(r.path!))} />
+                      ) : (
+                        <span className="w-[30px]" />
+                      )}
+                    </span>
                   </ListRow>
                 ))}
               </ListCard>

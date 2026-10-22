@@ -7,7 +7,7 @@ import { daysAgo, formatBytes, plural } from '../lib/format';
 import type { Batch, Problem, Target } from '../lib/types';
 import { useResource } from '../store/hooks';
 import { useAppStore } from '../store/useAppStore';
-import { Button, Callout, Card, Dialog, Empty, Icon, IconTile, SkeletonRows, type IconName } from '../ui';
+import { Button, Callout, Card, Collapse, Dialog, Empty, Icon, IconTile, SkeletonRows, type IconName } from '../ui';
 
 const TARGET_ICON: Record<Target['kind'], IconName> = {
   path: 'folder',
@@ -15,6 +15,7 @@ const TARGET_ICON: Record<Target['kind'], IconName> = {
   registryValue: 'power',
   service: 'cog',
   task: 'calendar',
+  pathEntry: 'code',
 };
 
 function BatchCard({
@@ -52,7 +53,7 @@ function BatchCard({
         </Button>
         <Button small kind="ghost" icon="trash" disabled={busy} onClick={onDelete} ariaLabel={`Delete ${batch.title} for good`} />
       </div>
-      {open && (
+      <Collapse open={open}>
         <ul className="border-t border-line px-4 py-2">
           {batch.items.map((item, i) => (
             <li key={`${item.label}-${i}`} className="flex items-center gap-3 py-1.5">
@@ -67,7 +68,7 @@ function BatchCard({
             </li>
           ))}
         </ul>
-      )}
+      </Collapse>
     </Card>
   );
 }
@@ -77,6 +78,7 @@ export function Quarantine() {
   const attempt = useAppStore((s) => s.attempt);
   const notify = useAppStore((s) => s.notify);
   const refresh = useAppStore((s) => s.refresh);
+  const afterChange = useAppStore((s) => s.afterChange);
   const updateSettings = useAppStore((s) => s.updateSettings);
   const safety = useAppStore((s) => s.settings?.safety);
   const keepDays = safety?.keepDays ?? 30;
@@ -102,7 +104,8 @@ export function Quarantine() {
       notify(errorText(e));
     }
     setBusy(null);
-    refresh('quarantine', 'storage', 'apps', 'startup', 'services', 'tasks');
+    afterChange();
+    refresh('apps');
   };
 
   const remove = async (batch: Batch) => {
@@ -115,7 +118,7 @@ export function Quarantine() {
       notify(errorText(e));
     }
     setBusy(null);
-    refresh('quarantine', 'storage');
+    afterChange();
   };
 
   return (
@@ -184,7 +187,7 @@ export function Quarantine() {
             </>
           }
         >
-          <h2 className="text-h2 font-bold">Delete “{deleting.title}” for good?</h2>
+          <h2 className="text-h2 font-bold">Delete «{deleting.title}» for good?</h2>
           <p className="mt-2 text-body leading-normal text-fg-3">
             {plural(deleting.items.length, 'item', 'items')} can't be put back afterwards.
           </p>

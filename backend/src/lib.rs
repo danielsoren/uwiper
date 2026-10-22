@@ -4,6 +4,7 @@ mod error;
 mod icons;
 mod leftovers;
 mod log;
+mod orphans;
 mod paths;
 mod quarantine;
 mod services;
@@ -33,6 +34,7 @@ pub fn run() {
             // Housekeeping: old quarantine batches and logs go away in the background.
             let for_cleanup = settings.clone();
             std::thread::spawn(move || {
+                system::remove_old_autostart();
                 quarantine::purge_expired(&for_cleanup);
                 log::purge(&for_cleanup);
             });
@@ -54,6 +56,7 @@ pub fn run() {
             settings::save_settings,
             paths::storage_info,
             leftovers::scan_leftovers,
+            orphans::scan_orphans,
             uninstall::create_restore_point,
             uninstall::start_uninstall,
             uninstall::uninstall_finished,

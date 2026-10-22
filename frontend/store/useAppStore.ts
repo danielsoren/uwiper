@@ -3,6 +3,7 @@ import { api, errorText } from '../lib/api';
 import type {
   Batch,
   CleanupItem,
+  OrphanScan,
   Environment,
   InstalledApp,
   ServiceItem,
@@ -23,6 +24,7 @@ export interface Resources {
   tasks: TaskItem[];
   storage: StorageInfo;
   quarantine: Batch[];
+  orphans: OrphanScan;
 }
 
 export type ResourceKey = keyof Resources;
@@ -42,6 +44,7 @@ const FETCH: { [K in ResourceKey]: () => Promise<Resources[K]> } = {
   tasks: api.listTasks,
   storage: api.storageInfo,
   quarantine: api.listQuarantine,
+  orphans: api.scanOrphans,
 };
 
 const idle = <T>(): Resource<T> => ({ data: null, error: null, loading: false, requested: false });
@@ -66,6 +69,8 @@ interface AppState {
   load: <K extends ResourceKey>(key: K, force?: boolean) => void;
   /** Loads again whatever of these was loaded before, after something changed. */
   refresh: (...keys: ResourceKey[]) => void;
+  /** After anything was removed or restored: every list it can show up in. */
+  afterChange: () => void;
   /** Applies a change right away and saves it; a failed save rolls it back. */
   updateSettings: (change: (s: Settings) => Settings) => void;
   notify: (text: string) => void;
@@ -92,6 +97,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       tasks: idle(),
       storage: idle(),
       quarantine: idle(),
+      orphans: idle(),
     },
     toasts: [],
 
@@ -120,6 +126,8 @@ export const useAppStore = create<AppState>()((set, get) => {
     refresh: (...keys) => {
       for (const key of keys) if (get().res[key].requested) get().load(key, true);
     },
+
+    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks', 'orphans'),
 
     updateSettings: (change) => {
       const before = get().settings;

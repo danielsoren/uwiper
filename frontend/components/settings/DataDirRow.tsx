@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { inTauri, pickFolder } from '../../lib/api';
+import { api, inTauri, pickFolder } from '../../lib/api';
+import { useAppStore } from '../../store/useAppStore';
 import { formatBytes } from '../../lib/format';
 import type { DataDir, DataDirKey } from '../../lib/types';
 import { Button, Field, Pill, Skeleton } from '../../ui';
@@ -9,7 +10,7 @@ const META: Record<DataDirKey, { label: string; sub: string }> = {
   quarantine: { label: 'Quarantine', sub: 'Removed files plus .reg backups of deleted registry keys' },
   snapshots: { label: 'Install snapshots', sub: 'What each tracked installer created' },
   logs: { label: 'Logs', sub: 'What UWiper did and when' },
-  temp: { label: 'Temporary files', sub: 'Emptied every time UWiper closes' },
+  temp: { label: 'Temporary files', sub: "Reserved for UWiper's own scratch files – nothing is kept there yet" },
 };
 
 /** Stands in for the data folder rows until their sizes are known. */
@@ -24,6 +25,7 @@ export function DataDirPlaceholders() {
 /** A data folder with its size, and an inline editor when custom locations are on. */
 export function DataDirRow({ dir, editable, onSave }: { dir: DataDir; editable: boolean; onSave: (path: string | null) => void }) {
   const [draft, setDraft] = useState<string | null>(null);
+  const attempt = useAppStore((s) => s.attempt);
   const meta = META[dir.key];
 
   const save = (value: string | null) => {
@@ -45,6 +47,7 @@ export function DataDirRow({ dir, editable, onSave }: { dir: DataDir; editable: 
         <div className="flex flex-wrap items-center justify-end gap-2">
           {!dir.inside && <Pill tone="warn">Outside UWiper folder</Pill>}
           <span className="text-small text-fg-3">{dir.exists ? formatBytes(dir.sizeBytes) : 'Not created yet'}</span>
+          {dir.exists && <Button small kind="ghost" icon="folder" ariaLabel={`Open the ${meta.label.toLowerCase()} folder`} onClick={() => attempt(() => api.openFolder(dir.path))} />}
           {!editable ? (
             <Locked>In UWiper folder</Locked>
           ) : (

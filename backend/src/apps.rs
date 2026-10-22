@@ -39,7 +39,7 @@ pub struct InstalledApp {
     pub(crate) quiet_uninstall_string: Option<String>,
     registry_key: String,
     #[serde(skip)]
-    display_icon: Option<String>,
+    pub(crate) display_icon: Option<String>,
 }
 
 /// Lists installed apps with their real size and icon, so nothing changes
@@ -177,12 +177,15 @@ pub(crate) fn location_from_uninstaller(uninstall: Option<&str>, shared: &[Strin
 }
 
 fn icon_of(app: &InstalledApp) -> Option<String> {
-    let listed = app
-        .display_icon
-        .as_deref()
-        .and_then(icons::parse_spec)
-        .filter(|(file, _)| !icons::is_uninstaller(file) && file.is_file());
-    if let Some((file, index)) = listed {
+    // Where Windows looks: DisplayIcon, then the MSI product icon.
+    let listed = app.display_icon.as_deref().and_then(icons::parse_spec);
+    let msi = msi_product_code(app)
+        .and_then(imp::msi_product_icon)
+        .and_then(|spec| icons::parse_spec(&spec));
+    for (file, index) in listed.into_iter().chain(msi) {
+        if icons::is_uninstaller(&file) || !file.is_file() {
+            continue;
+        }
         if let Some(url) = icons::data_url(&file, index) {
             return Some(url);
         }
@@ -191,18 +194,53 @@ fn icon_of(app: &InstalledApp) -> Option<String> {
     icons::data_url(&exe, 0)
 }
 
-/// Guesses the app's own exe among the ones at the top of its folder.
+fn exes_in(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|it| {
+            it.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) && !icons::is_helper_exe(p))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Guesses the app's own exe: at the top of its folder, or one level down
+/// (Adobe keeps Acrobat.exe in `Acrobat DC\Acrobat`).
 fn main_exe(dir: &Path, name: &str) -> Option<PathBuf> {
-    let exes: Vec<PathBuf> = std::fs::read_dir(dir)
+    if let Some(exe) = pick_main_exe(exes_in(dir), name) {
+        return Some(exe);
+    }
+    let subdirs: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) && !icons::is_helper_exe(p))
+        .filter(|p| p.is_dir())
+        .take(40)
         .collect();
-    pick_main_exe(exes, name)
+    let nested: Vec<PathBuf> = subdirs.iter().flat_map(|d| exes_in(d)).collect();
+    pick_named_exe(&nested, name)
 }
 
-fn pick_main_exe(mut exes: Vec<PathBuf>, name: &str) -> Option<PathBuf> {
+/// MSI's packed form of a product code, as used under `Installer\Products`.
+pub fn packed_guid(code: &str) -> Option<String> {
+    let hex: String = code.chars().filter(char::is_ascii_hexdigit).collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let rev = |s: &str| s.chars().rev().collect::<String>();
+    let mut out = format!("{}{}{}", rev(&hex[..8]), rev(&hex[8..12]), rev(&hex[12..16]));
+    for pair in hex.as_bytes()[16..].chunks(2) {
+        out.push(pair[1] as char);
+        out.push(pair[0] as char);
+    }
+    Some(out.to_uppercase())
+}
+
+/// The exe whose name matches the app's name, if any. A name inside the
+/// app's name ("Acrobat" in "Adobe Acrobat") beats one that only shares the
+/// first word ("AdobeCollabSync").
+fn pick_named_exe(exes: &[PathBuf], name: &str) -> Option<PathBuf> {
     let squash = |s: &str| {
         s.chars()
             .filter(char::is_ascii_alphanumeric)
@@ -211,14 +249,18 @@ fn pick_main_exe(mut exes: Vec<PathBuf>, name: &str) -> Option<PathBuf> {
     };
     let app = squash(name);
     let first_word = squash(name.split_whitespace().next().unwrap_or_default());
-    let matches = |p: &PathBuf| {
-        let stem = squash(&icons::stem(p));
-        stem.len() >= 3 && (app.contains(&stem) || (first_word.len() >= 3 && stem.contains(&first_word)))
-    };
-    if let Some(found) = exes.iter().find(|p| matches(p)) {
-        return Some(found.clone());
-    }
-    (exes.len() == 1).then(|| exes.remove(0))
+    let stem = |p: &PathBuf| squash(&icons::stem(p));
+    exes.iter()
+        .find(|p| stem(p).len() >= 3 && app.contains(&stem(p)))
+        .or_else(|| {
+            exes.iter()
+                .find(|p| first_word.len() >= 3 && stem(p).contains(&first_word))
+        })
+        .cloned()
+}
+
+fn pick_main_exe(mut exes: Vec<PathBuf>, name: &str) -> Option<PathBuf> {
+    pick_named_exe(&exes, name).or_else(|| (exes.len() == 1).then(|| exes.remove(0)))
 }
 
 /// `20260312` → `2026-03-12`
@@ -241,6 +283,10 @@ mod imp {
 
     pub fn list() -> Result<Vec<InstalledApp>> {
         Err(Error::Unsupported)
+    }
+
+    pub fn msi_product_icon(_code: &str) -> Option<String> {
+        None
     }
 }
 
@@ -280,6 +326,29 @@ mod imp {
         }
         out.sort_by_key(|a| a.name.to_lowercase());
         Ok(out)
+    }
+
+    /// The icon Windows Installer keeps for an MSI product.
+    pub fn msi_product_icon(code: &str) -> Option<String> {
+        let packed = super::packed_guid(code)?;
+        [
+            (
+                HKEY_LOCAL_MACHINE,
+                format!(r"SOFTWARE\Classes\Installer\Products\{packed}"),
+            ),
+            (
+                HKEY_CURRENT_USER,
+                format!(r"Software\Microsoft\Installer\Products\{packed}"),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(hive, path)| {
+            RegKey::predef(hive)
+                .open_subkey_with_flags(path, KEY_READ)
+                .and_then(|k| k.get_value::<String, _>("ProductIcon"))
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
     }
 
     fn read(
@@ -403,6 +472,27 @@ mod tests {
             Some(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\Discord")
         );
         assert_eq!(uninstall_key_path("bogus"), None);
+    }
+
+    #[test]
+    fn packs_msi_product_codes() {
+        assert_eq!(
+            packed_guid("{AC76BA86-1033-FFFF-7760-BC15014EA700}").as_deref(),
+            Some("68AB67CA3301FFFF7706CB5110E47A00")
+        );
+        assert_eq!(packed_guid("nope"), None);
+    }
+
+    #[test]
+    fn prefers_the_exe_named_in_the_app_name() {
+        let exes = vec![
+            PathBuf::from(r"C:\A\AdobeCollabSync.exe"),
+            PathBuf::from(r"C:\A\Acrobat.exe"),
+        ];
+        assert_eq!(
+            pick_named_exe(&exes, "Adobe Acrobat (64-bit)"),
+            Some(PathBuf::from(r"C:\A\Acrobat.exe"))
+        );
     }
 
     #[test]

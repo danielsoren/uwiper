@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::Result;
-use crate::{paths, system, AppState};
+use crate::{paths, AppState};
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -13,7 +13,6 @@ pub struct Settings {
     pub safety: Safety,
     pub scan: Scan,
     pub appearance: Appearance,
-    pub footprint: Footprint,
 }
 
 /// Where UWiper keeps its data. With `one_folder` on, everything lives in
@@ -131,13 +130,6 @@ impl Default for Appearance {
     }
 }
 
-/// Things UWiper may create outside its own folder. All off by default.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Footprint {
-    pub start_with_windows: bool,
-}
-
 /// Reads settings.toml, writing the defaults on first launch so the file is
 /// there to inspect from the start.
 pub fn load() -> Settings {
@@ -171,7 +163,6 @@ pub fn get_settings(state: State<'_, AppState>) -> Settings {
 
 #[tauri::command(async)]
 pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<Settings> {
-    system::apply_footprint(&settings.footprint)?;
     persist(&settings)?;
     *state.settings.lock().unwrap() = settings.clone();
     Ok(settings)

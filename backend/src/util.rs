@@ -140,6 +140,33 @@ pub fn file_state(path: &str) -> Option<bool> {
     }
 }
 
+/// Variables that point into the profile of whoever runs the program.
+const PER_USER_VARS: [&str; 7] = [
+    "%appdata%",
+    "%localappdata%",
+    "%userprofile%",
+    "%temp%",
+    "%tmp%",
+    "%homepath%",
+    "%onedrive%",
+];
+
+/// True when a command depends on which user runs it, so from this user's
+/// view a missing file says nothing about another user's.
+pub fn uses_per_user_vars(command: &str) -> bool {
+    let c = command.to_lowercase();
+    PER_USER_VARS.iter().any(|v| c.contains(v))
+}
+
+/// `file_state` for a program path, and `None` when the path still holds
+/// a variable that couldn't be expanded.
+pub fn program_state(path: &str) -> Option<bool> {
+    if path.contains('%') {
+        return None;
+    }
+    file_state(path)
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn is_windows_path(path: &str) -> bool {
     let windir = windows_dir().to_ascii_lowercase();
@@ -258,6 +285,34 @@ pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -
         }
     });
     results.into_inner().unwrap().into_iter().flatten().collect()
+}
+
+/// Size, file count and the newest change (Unix time) of a file or of
+/// everything in a folder. Links aren't followed.
+pub fn dir_stats(path: &Path) -> (u64, u64, Option<u64>) {
+    let secs = |m: &std::fs::Metadata| {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    };
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return (0, 0, None);
+    };
+    if !meta.is_dir() {
+        return (meta.len(), 1, secs(&meta));
+    }
+    let (mut bytes, mut files, mut newest) = (0u64, 0u64, secs(&meta));
+    for entry in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
+        if let Ok(m) = entry.metadata() {
+            newest = newest.max(secs(&m));
+            if entry.file_type().is_file() {
+                bytes += m.len();
+                files += 1;
+            }
+        }
+    }
+    (bytes, files, newest)
 }
 
 /// Total size of all files below `path`, skipping anything unreadable.
