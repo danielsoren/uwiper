@@ -10,8 +10,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{blocking, Result};
-use crate::targets::Guard;
-use crate::util::{canonical, expand_env, is_within, norm_path, parallel_map};
+use crate::targets::{self, Guard};
+use crate::util::{canonical, expand_env, fresh_time, is_within, parallel_map, pin_dir, pin_parents, Blocked, Pin};
 use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
@@ -268,9 +268,11 @@ impl Rules<'_> {
             || is_own(path, self.own)
     }
 
+    /// Made or written after the cutoff: an installer unpacking right now,
+    /// or a running program's unpacked files, keep their old write times.
     fn too_new(&self, meta: &std::fs::Metadata) -> bool {
         self.keep_newer_than
-            .is_some_and(|cutoff| meta.modified().map_or(true, |m| m > cutoff))
+            .is_some_and(|cutoff| fresh_time(meta).is_none_or(|t| t > cutoff))
     }
 }
 
@@ -289,36 +291,26 @@ fn is_link(meta: &std::fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 
-/// True when a path to clean goes through a link or junction somewhere below
-/// the user's or Windows' own folders – cleaning it could reach anywhere.
-fn through_link(path: &Path) -> bool {
-    let roots: Vec<String> = [
-        "TEMP",
-        "LOCALAPPDATA",
-        "APPDATA",
-        "USERPROFILE",
-        "ProgramData",
-        "SystemRoot",
-    ]
-    .iter()
-    .filter_map(|v| std::env::var(v).ok())
-    .map(|p| norm_path(&p))
-    .filter(|p| !p.is_empty())
-    .collect();
-    let mut current = Some(path);
-    while let Some(p) = current {
-        if roots.contains(&norm_path(&p.to_string_lossy())) {
-            return false;
-        }
-        match std::fs::symlink_metadata(p) {
-            Ok(meta) if is_link(&meta) => return true,
-            Ok(_) => {}
-            // Gone or unreadable: nothing to clean there anyway.
-            Err(_) => return true,
-        }
-        current = p.parent();
+/// Pins the folders on the way to a path to clean, so none of them can be
+/// swapped for a link while it's cleaned. Links at or above the user's and
+/// Windows' own folders are fine; below them, cleaning could reach anywhere.
+fn reach(path: &Path) -> std::result::Result<Vec<Pin>, Blocked> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| is_link(&m)) {
+        return Err(Blocked::Link);
     }
-    false
+    pin_parents(path)
+}
+
+/// A folder to clean that holds the user's own files: a drive root, the
+/// profile or one of its folders, or anything holding one – where %TEMP%
+/// points when it's set wrong. Cleaning can't be undone, so it's refused.
+fn holds_user_files(path: &Path) -> bool {
+    let p = canonical(&path.to_string_lossy());
+    path.parent().is_none()
+        || p.trim_end_matches('\\').len() <= 2
+        || targets::shared_folders(false)
+            .iter()
+            .any(|f| is_within(&canonical(f), &p))
 }
 
 fn measure_dir(dir: &Path, rules: &Rules, total: &mut (u64, u64)) {
@@ -346,7 +338,7 @@ fn measure_paths(paths: &[PathBuf], rules: &Rules) -> (u64, u64) {
         let Ok(meta) = std::fs::symlink_metadata(p) else {
             continue;
         };
-        if through_link(p) || rules.skips(p, &meta) {
+        if holds_user_files(p) || reach(p).is_err() || rules.skips(p, &meta) {
             continue;
         }
         if meta.is_dir() {
@@ -405,7 +397,7 @@ const NEVER_INSIDE: [&str; 6] = ["site-packages", "node_modules", "virtualenvs",
 /// What browsers and embedded browsers keep in a profile: sign-ins, cookies,
 /// history, site data, settings. Never cleaned, whichever category a folder
 /// comes from.
-const PROFILE_DATA: [&str; 24] = [
+const PROFILE_DATA: &[&str] = &[
     "cookies",
     "cookies-journal",
     "network",
@@ -429,7 +421,23 @@ const PROFILE_DATA: [&str; 24] = [
     "top sites",
     "extensions",
     "extension state",
+    "local extension settings",
+    "sync extension settings",
+    "managed extension settings",
     "shared_proto_db",
+    "sessions",
+    "current session",
+    "current tabs",
+    "last session",
+    "last tabs",
+    "visited links",
+    "storage",
+    "file system",
+    "webstorage",
+    "transportsecurity",
+    "network persistent state",
+    "trust tokens",
+    "sync data",
 ];
 
 fn holds_profile_data(dir: &Path) -> bool {
@@ -588,7 +596,8 @@ fn webview_caches(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let path = entry.path();
-        if is_chromium_cache(path) || name_of(path).eq_ignore_ascii_case("cache") {
+        // A "Cache" that holds a profile's data is a profile, not a cache.
+        if (is_chromium_cache(path) || name_of(path).eq_ignore_ascii_case("cache")) && !holds_profile_data(path) {
             out.push(path.to_path_buf());
             walker.skip_current_dir();
         } else if PROFILE_DATA.contains(&name_of(path).to_lowercase().as_str()) {
@@ -804,6 +813,11 @@ pub struct CleanReport {
     failed_files: u64,
     /// Folders left alone because they lead through a link or junction.
     skipped_links: u64,
+    /// Folders UWiper couldn't open.
+    unreadable_folders: u64,
+    /// Folders to clean that hold the user's own files (%TEMP% set to the
+    /// profile, say), left alone.
+    refused: Vec<String>,
 }
 
 /// Deletes the contents of the chosen cache categories. Folders themselves
@@ -851,10 +865,21 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
                 if guard.is_excluded(&path.to_string_lossy()) {
                     continue;
                 }
-                if through_link(&path) {
-                    report.skipped_links += 1;
+                if holds_user_files(&path) {
+                    lines.push(format!("  left alone {} – it holds your own files", path.display()));
+                    report.refused.push(path.to_string_lossy().into_owned());
                     continue;
                 }
+                // Held until it's cleaned.
+                let _pins = match reach(&path) {
+                    Ok(pins) => pins,
+                    Err(Blocked::Link) => {
+                        report.skipped_links += 1;
+                        continue;
+                    }
+                    // Nothing to clean, or nothing the scan could measure either.
+                    Err(Blocked::Gone | Blocked::Unreadable) => continue,
+                };
                 let Ok(meta) = std::fs::symlink_metadata(&path) else {
                     continue;
                 };
@@ -862,9 +887,9 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
                     continue;
                 }
                 if meta.is_dir() {
-                    empty_dir(&path, &rules, &mut report);
+                    empty_dir(&path, &rules, &mut report, true);
                 } else if !rules.too_new(&meta) {
-                    remove_file(&path, meta.len(), &mut report);
+                    remove_file(&path, &meta, &mut report);
                 }
             }
             lines.push(format!("  {name} – {} bytes", report.freed_bytes - before));
@@ -875,17 +900,49 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
                 report.skipped_links
             ));
         }
+        if report.unreadable_folders > 0 {
+            lines.push(format!("  {} folders couldn't be opened", report.unreadable_folders));
+        }
         log::write(&settings, &lines);
         Ok(report)
     })
     .await
 }
 
-fn remove_file(path: &Path, len: u64, report: &mut CleanReport) {
-    match std::fs::remove_file(path) {
-        Ok(()) => report.freed_bytes += len,
+fn remove_file(path: &Path, meta: &std::fs::Metadata, report: &mut CleanReport) {
+    let mut result = std::fs::remove_file(path);
+    // Read-only files go once the flag is cleared; it's put back if they still don't.
+    let denied = |r: &std::io::Result<()>| {
+        r.as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    };
+    if denied(&result) && meta.permissions().readonly() {
+        let mut writable = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        if std::fs::set_permissions(path, writable).is_ok() {
+            result = std::fs::remove_file(path);
+            if result.is_err() {
+                let _ = std::fs::set_permissions(path, meta.permissions());
+            }
+        }
+    }
+    let sharing = |e: &std::io::Error| matches!(e.raw_os_error(), Some(32 | 33));
+    match result {
+        Ok(()) => report.freed_bytes += meta.len(),
         // Sharing and lock violations: an app has it open.
-        Err(e) if matches!(e.raw_os_error(), Some(32 | 33)) => report.skipped_files += 1,
+        Err(e) if sharing(&e) => report.skipped_files += 1,
+        // A running program can't be deleted either, but Windows calls that
+        // "access denied"; it can't be opened for writing then.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .is_err_and(|e| sharing(&e)) =>
+        {
+            report.skipped_files += 1
+        }
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => report.denied_files += 1,
         Err(_) => report.failed_files += 1,
     }
@@ -897,8 +954,25 @@ fn is_own(path: &Path, own: &[String]) -> bool {
     own.iter().any(|dir| is_within(&p, dir))
 }
 
-fn empty_dir(dir: &Path, rules: &Rules, report: &mut CleanReport) {
+/// Deletes what's in a folder, the folder held open meanwhile so it can't be
+/// swapped for a link half-way. A folder that can't be opened is counted,
+/// unless it's the one to clean itself: the scan couldn't measure it either.
+fn empty_dir(dir: &Path, rules: &Rules, report: &mut CleanReport, top: bool) {
+    // Held until the folder is done.
+    let _pin = match pin_dir(dir) {
+        Ok(pin) => pin,
+        Err(Blocked::Link) => {
+            report.skipped_links += 1;
+            return;
+        }
+        Err(Blocked::Gone) => return,
+        Err(Blocked::Unreadable) => {
+            report.unreadable_folders += u64::from(!top);
+            return;
+        }
+    };
     let Ok(entries) = std::fs::read_dir(dir) else {
+        report.unreadable_folders += u64::from(!top);
         return;
     };
     for entry in entries.flatten() {
@@ -910,11 +984,13 @@ fn empty_dir(dir: &Path, rules: &Rules, report: &mut CleanReport) {
             continue;
         }
         if meta.is_dir() {
-            empty_dir(&path, rules, report);
-            // Succeeds only once it's empty.
-            let _ = std::fs::remove_dir(&path);
+            empty_dir(&path, rules, report, false);
+            // Succeeds only once it's empty; one made today stays.
+            if !rules.too_new(&meta) {
+                let _ = std::fs::remove_dir(&path);
+            }
         } else if !rules.too_new(&meta) {
-            remove_file(&path, meta.len(), report);
+            remove_file(&path, &meta, report);
         }
     }
 }
@@ -1057,7 +1133,7 @@ mod tests {
         std::fs::write(dir.join("sub/Network/Cookies"), b"c").unwrap();
         std::fs::write(dir.join("sub/History"), b"h").unwrap();
         let mut report = CleanReport::default();
-        empty_dir(&dir, &Rules::for_category("t", &own), &mut report);
+        empty_dir(&dir, &Rules::for_category("t", &own), &mut report, true);
         assert_eq!(report.freed_bytes, 15);
         assert_eq!(report.skipped_files, 0);
         assert!(dir.is_dir());
@@ -1101,9 +1177,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("valuable")).unwrap();
         std::fs::write(dir.join("valuable/keep.txt"), b"k").unwrap();
         std::os::unix::fs::symlink(dir.join("valuable"), dir.join("Cache")).unwrap();
-        assert!(through_link(&dir.join("Cache")));
-        assert!(through_link(&dir.join("Cache").join("inner")));
-        assert!(!through_link(&dir.join("valuable")));
+        assert_eq!(reach(&dir.join("Cache")).err(), Some(Blocked::Link));
+        assert_eq!(reach(&dir.join("Cache").join("inner")).err(), Some(Blocked::Link));
+        assert!(reach(&dir.join("valuable")).is_ok());
+        assert!(holds_user_files(Path::new("/")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -36,7 +36,7 @@
 |  |  |
 | --- | --- |
 | 📦 **Install tracking** | Track an install, and UWiper notes everything the installer adds – folders, registry keys, services, tasks, shortcuts, drivers. Uninstalling the app later removes all of it. Snapshots hold names only, never contents. |
-| 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like. |
+| 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like – what the uninstaller itself removes isn't in quarantine. Edge and the runtimes other apps need stay while Windows components are protected. |
 | 🔎 **Leftovers, explained** | Every find says why it's there and how sure UWiper is: **High** – certainly the app's, **Medium** – named after it, **Low** – may be shared. You tick what goes. |
 | ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML, driver packages exported – each backed up and recorded before anything changes. Restore a batch in one click. Batches are deleted for good after 30 days (you choose). |
 | 👻 **Leftovers of apps long gone** | Folders and settings no installed app claims, apps still listed as installed whose files are gone, shortcuts and PATH entries pointing nowhere, startup entries, services and tasks whose programs are missing. Each with how sure UWiper is and when it last changed. |

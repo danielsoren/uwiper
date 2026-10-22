@@ -137,39 +137,85 @@ impl Default for Appearance {
 const VERSION: u32 = 1;
 
 /// Brings settings written by an older UWiper up to date.
-fn migrate(mut s: Settings) -> (Settings, bool) {
+/// Updates settings written by an older UWiper; the note tells the user
+/// about a choice that changed.
+fn migrate(mut s: Settings) -> (Settings, bool, Option<String>) {
     if s.version >= VERSION {
-        return (s, false);
+        return (s, false, None);
     }
+    let mut note = None;
     // 1.0: only High finds are picked to start with. "High and Medium" was
-    // the old default, so it's taken as not chosen on purpose.
+    // the old default, so it's taken as not chosen on purpose – and said so,
+    // in case it was.
     if s.safety.preselect == "high-medium" {
         s.safety.preselect = "high".into();
+        note = Some(
+            "Leftovers now pick only High finds to start with. If you'd chosen High & Medium, \
+             set it again in Settings → Safety."
+                .to_string(),
+        );
     }
     s.version = VERSION;
-    (s, true)
+    (s, true, note)
+}
+
+fn defaults() -> Settings {
+    Settings {
+        version: VERSION,
+        ..Settings::default()
+    }
 }
 
 /// Reads settings.toml, writing the defaults on first launch so the file is
-/// there to inspect from the start.
-pub fn load() -> Settings {
-    match std::fs::read_to_string(paths::settings_file()) {
-        Ok(text) => {
-            let (settings, changed) = migrate(toml::from_str(&text).unwrap_or_default());
+/// there to inspect from the start. A file UWiper can't read – a typo, or
+/// one from a newer UWiper – is set aside, never overwritten; the note
+/// says where it went.
+pub fn load() -> (Settings, Option<String>) {
+    let file = paths::settings_file();
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        let defaults = defaults();
+        // Unreadable but there: leave it be.
+        if !file.exists() {
+            let _ = persist(&defaults);
+        }
+        return (defaults, None);
+    };
+    match toml::from_str(&text) {
+        Ok(settings) => {
+            let (settings, changed, note) = migrate(settings);
             if changed {
                 let _ = persist(&settings);
             }
-            settings
+            (settings, note)
         }
-        Err(_) => {
-            let defaults = Settings {
-                version: VERSION,
-                ..Settings::default()
+        Err(e) => {
+            let aside = file.with_file_name(format!("settings.broken-{}.toml", crate::util::now_secs()));
+            let note = match std::fs::rename(&file, &aside) {
+                Ok(()) => {
+                    let _ = persist(&defaults());
+                    format!(
+                        "settings.toml couldn't be read ({}), so UWiper started with its defaults. \
+                         Your file is kept as {}.",
+                        e.message(),
+                        aside.file_name().unwrap_or_default().to_string_lossy()
+                    )
+                }
+                Err(_) => format!(
+                    "settings.toml couldn't be read ({}), so UWiper uses its defaults for now. \
+                     Saving settings will replace the file.",
+                    e.message()
+                ),
             };
-            let _ = persist(&defaults);
-            defaults
+            (defaults(), Some(note))
         }
     }
+}
+
+/// A note about the settings for the user, once: why they were reset or
+/// what changed in them.
+#[tauri::command(async)]
+pub fn settings_notice(state: State<'_, AppState>) -> Option<String> {
+    state.notice.lock().unwrap().take()
 }
 
 fn persist(settings: &Settings) -> Result<()> {
@@ -213,8 +259,9 @@ mod tests {
     #[test]
     fn older_settings_pick_only_high_finds() {
         let old: Settings = toml::from_str("[safety]\npreselect = \"high-medium\"\n").unwrap();
-        let (new, changed) = migrate(old);
+        let (new, changed, note) = migrate(old);
         assert!(changed && new.safety.preselect == "high" && new.version == VERSION);
+        assert!(note.is_some(), "the user is told");
         let chosen: Settings = toml::from_str("version = 1\n[safety]\npreselect = \"high-medium\"\n").unwrap();
         assert_eq!(
             migrate(chosen).0.safety.preselect,

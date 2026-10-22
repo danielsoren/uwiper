@@ -4,8 +4,11 @@
 
 use serde::Serialize;
 
+use tauri::State;
+
 use crate::apps;
 use crate::error::{blocking, Error, Result};
+use crate::AppState;
 
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -23,10 +26,18 @@ pub async fn create_restore_point(app_name: String) -> Result<RestorePoint> {
 
 /// Starts the app's uninstaller and returns right away. Uninstallers often
 /// hand over to a second process, so the UI watches `uninstall_finished`.
+/// Windows' own components stay while "Protect Windows components" is on:
+/// what their uninstaller removes isn't in quarantine.
 #[tauri::command]
-pub async fn start_uninstall(id: String, quiet: bool) -> Result<()> {
+pub async fn start_uninstall(state: State<'_, AppState>, id: String, quiet: bool) -> Result<()> {
+    let protect = state.settings.lock().unwrap().safety.protect_system;
     blocking(move || {
         let app = apps::find(&id)?.ok_or(Error::Other("This app is no longer installed".into()))?;
+        if let Some(why) = app.component.filter(|_| protect) {
+            return Err(Error::Other(format!(
+                "{why}. To uninstall it anyway, turn off «Protect Windows and Microsoft components» in Settings."
+            )));
+        }
         let (program, args) = command(&app, quiet)?;
         imp::launch(&program, &args)
     })

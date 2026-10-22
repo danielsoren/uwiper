@@ -11,6 +11,7 @@ import { AppTile } from './AppTile';
 type Step =
   | { name: 'confirm' }
   | { name: 'restore-point' }
+  | { name: 'no-restore-point'; message: string }
   | { name: 'running'; error?: string }
   | { name: 'scanning' }
   | { name: 'review'; leftovers: Leftover[]; stillInstalled: boolean }
@@ -68,8 +69,19 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
   const start = async () => {
     if (wantRestorePoint) {
       setStep({ name: 'restore-point' });
-      setRestorePoint(await api.createRestorePoint(app.name).catch((e) => ({ created: false, message: errorText(e) })));
+      const point = await api.createRestorePoint(app.name).catch((e) => ({ created: false, message: errorText(e) }));
+      setRestorePoint(point);
+      // What the uninstaller removes isn't in quarantine: without the restore
+      // point asked for, nothing could bring it back, so ask first.
+      if (!point.created) {
+        setStep({ name: 'no-restore-point', message: point.message });
+        return;
+      }
     }
+    run();
+  };
+
+  const run = async () => {
     setStep({ name: 'running' });
     try {
       await api.startUninstall(app.id, quiet);
@@ -156,8 +168,14 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
         {header(`Uninstall ${app.name}?`, [app.publisher, app.version && `version ${app.version}`].filter(Boolean).join(' · '))}
         <p className="text-body leading-normal text-fg-2">
           UWiper runs the app's own uninstaller, then looks for everything it left behind. You check the list before anything is
-          {quarantine ? ' moved to quarantine.' : ' deleted.'}
+          {quarantine ? ' moved to quarantine.' : ' deleted.'} What the uninstaller itself removes isn't in quarantine – only a
+          restore point can bring that back.
         </p>
+        {app.component && (
+          <div className="mt-3">
+            <Callout message={`${app.component}. Protection for Windows components is off, so UWiper lets you uninstall it – keep the restore point on.`} />
+          </div>
+        )}
         <div className="mt-3 divide-y divide-line">
           <Row
             label="Create a restore point first"
@@ -200,6 +218,30 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
             <SkeletonRows rows={3} tile={false} />
           </div>
         )}
+      </Dialog>
+    );
+  }
+
+  if (step.name === 'no-restore-point') {
+    return (
+      <Dialog
+        label={`Uninstall ${app.name}`}
+        onClose={close}
+        footer={
+          <>
+            <Button onClick={close}>Cancel</Button>
+            <Button kind="danger" icon="trash" onClick={run}>
+              Uninstall without it
+            </Button>
+          </>
+        }
+      >
+        {header(`No restore point`, app.name)}
+        <Callout message={step.message} />
+        <p className="mt-3 text-body leading-normal text-fg-2">
+          Without a restore point, what {app.name}'s uninstaller removes can't be brought back. Leftovers UWiper removes afterwards
+          {quarantine ? ' still go to quarantine.' : ' are deleted for good.'}
+        </p>
       </Dialog>
     );
   }

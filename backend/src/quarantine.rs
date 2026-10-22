@@ -18,6 +18,33 @@ use crate::{log, AppState};
 /// One batch is written at a time.
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// Held while a batch is written, restored, deleted or recovered, so a
+/// second copy of UWiper running at the same time waits its turn.
+fn process_lock(root: &Path, wait: bool) -> std::result::Result<Option<std::fs::File>, Error> {
+    let busy = || Error::Other("Another UWiper window is working with quarantine – try again when it's done".into());
+    let file = std::fs::create_dir_all(root).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(root.join(".lock"))
+    });
+    // No lock file, no batch either: writing one fails with its own error.
+    let Ok(file) = file else { return Ok(None) };
+    let tries = if wait { 100 } else { 1 };
+    for i in 0..tries {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) if i + 1 < tries => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(busy()),
+            Err(std::fs::TryLockError::Error(_)) => return Ok(None),
+        }
+    }
+    Err(busy())
+}
+
 const MANIFEST: &str = "manifest.json";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -44,6 +71,15 @@ pub struct Item {
     /// here, the next start finds out which way it went.
     #[serde(default)]
     pending: bool,
+    /// Only part of it went (a registry key with a protected subkey, a
+    /// service Windows removes at the next restart): what's left is no sign
+    /// of a reinstall when it's put back.
+    #[serde(default)]
+    partial: bool,
+    /// Its fingerprint just before it was removed, to tell after a crash
+    /// whether the removal had started.
+    #[serde(default)]
+    before: Option<String>,
 }
 
 /// Something to remove, as the UI sends it.
@@ -170,6 +206,7 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let keep = settings.safety.quarantine;
     let root = root(settings);
+    let _other_copies = process_lock(&root, true)?;
     let id = new_id(&root, title);
     let dir = root.join(&id);
     let mut batch = Batch {
@@ -192,7 +229,7 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
             });
             continue;
         }
-        if let Err(reason) = check(&item.target) {
+        if let Err(reason) = check(&item.target).and_then(|()| driver_unused(&item)) {
             log.push(format!("  skipped {} – {reason}", item.label));
             report.problems.push(Problem {
                 label: item.label,
@@ -216,13 +253,23 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
         }
         let result = if keep {
             let item_dir = format!("{i:03}");
+            let not_written = |e: &Error| format!("Not removed – the quarantine list couldn't be written ({e})");
             match quarantine_one(&dir, &item_dir, &item, &mut batch) {
                 Ok(note) => Ok(note),
                 Err(Failure::Item(e)) => Err(e),
                 Err(Failure::Journal(e)) => {
-                    let why = format!("Not removed – the quarantine list couldn't be written ({e})");
+                    let why = not_written(&e);
                     stopped = Some(why.clone());
                     Err(Error::Other(why))
+                }
+                // It's gone and its backup is safe; the list is put right at the next start.
+                Err(Failure::JournalAfter(note, e)) => {
+                    stopped = Some(not_written(&e));
+                    let more = "the quarantine list is finished when UWiper starts again";
+                    Ok(Some(match note {
+                        Some(note) => format!("{note}; {more}"),
+                        None => format!("Removed – {more}"),
+                    }))
                 }
             }
         } else {
@@ -256,11 +303,29 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
     Ok(report)
 }
 
+/// Only a driver package that's surely unused goes: pnputil itself refuses
+/// only one a device uses, not one a service or printer runs from.
+fn driver_unused(item: &Removal) -> std::result::Result<(), String> {
+    if !matches!(item.target, Target::Driver { .. }) {
+        return Ok(());
+    }
+    if item.check.is_none() {
+        return Err("UWiper couldn't tell whether Windows uses it".into());
+    }
+    match targets::fingerprint(&item.target) {
+        Some(now) if now.ends_with(":unused") => Ok(()),
+        Some(now) if now.ends_with(":used") => Err("Windows uses it".into()),
+        _ => Err("UWiper couldn't tell whether Windows uses it".into()),
+    }
+}
+
 enum Failure {
     /// This item couldn't be backed up or removed; the batch goes on.
     Item(Error),
     /// The quarantine list can't be written: nothing more may be removed.
     Journal(Error),
+    /// Removed, but the list couldn't record it: nothing more may be removed.
+    JournalAfter(Option<String>, Error),
 }
 
 /// Backs one item up, records it as pending, removes it and records that.
@@ -283,6 +348,7 @@ fn quarantine_one(
             return Err(Failure::Item(e));
         }
     };
+    let moved = matches!(backup, Backup::Moved { .. });
     batch.items.push(Item {
         label: item.label.clone(),
         target: item.target.clone(),
@@ -291,6 +357,8 @@ fn quarantine_one(
         dir: item_dir.to_string(),
         note: None,
         pending: true,
+        partial: false,
+        before: (!moved).then(|| targets::fingerprint(&item.target)).flatten(),
     });
     if let Err(e) = save(dir, batch) {
         discard(batch);
@@ -299,12 +367,17 @@ fn quarantine_one(
     let removed = targets::remove(&item.target, &backup, &path);
     match removed {
         Ok(note) => {
+            // Folders that kept some files are merged back anyway.
+            let partial = !moved && targets::exists(&item.target);
             if let Some(last) = batch.items.iter_mut().find(|i| i.dir == item_dir) {
                 last.pending = false;
+                last.partial = partial;
                 last.note = note.clone();
             }
             // Should this fail, the next start sees the item is gone and finishes it.
-            save(dir, batch).map_err(Failure::Journal)?;
+            if let Err(e) = save(dir, batch) {
+                return Err(Failure::JournalAfter(note, e));
+            }
             Ok(note)
         }
         Err(e) => {
@@ -315,10 +388,46 @@ fn quarantine_one(
     }
 }
 
+/// What became of an item a crash or power cut interrupted.
+#[derive(Debug, PartialEq)]
+enum Interrupted {
+    Done,
+    Partly,
+    NotStarted,
+}
+
+fn interrupted(item: &Item, dir: &Path) -> Interrupted {
+    let there = targets::exists(&item.target);
+    match &item.backup {
+        // A copy across drives gets its name only once it's whole.
+        Backup::Moved { file } => match (std::fs::symlink_metadata(dir.join(&item.dir).join(file)).is_ok(), there) {
+            (false, _) => Interrupted::NotStarted,
+            (true, false) => Interrupted::Done,
+            (true, true) => Interrupted::Partly,
+        },
+        _ if !there => Interrupted::Done,
+        // A key tree or a service can stop half-way; whether it started shows in its fingerprint.
+        Backup::Reg { .. } => match (&item.before, targets::fingerprint(&item.target)) {
+            (Some(before), Some(now)) if *before == now => Interrupted::NotStarted,
+            _ => Interrupted::Partly,
+        },
+        Backup::TaskXml { .. } => Interrupted::Partly,
+        // A value, a PATH edit and a driver package go in one step.
+        _ => Interrupted::NotStarted,
+    }
+}
+
 /// Finishes what a crash or power cut interrupted: an item recorded as
-/// pending is done when its target is gone, and dropped when it's still there.
+/// pending is done when its target is gone, kept as partly removed when the
+/// removal started and dropped when it never did.
 pub fn recover(settings: &Settings) {
-    let Ok(entries) = std::fs::read_dir(root(settings)) else {
+    let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = root(settings);
+    // Another copy of UWiper is busy: its batches aren't interrupted.
+    let Ok(_other_copies) = process_lock(&root, false) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
         return;
     };
     for entry in entries.flatten() {
@@ -333,20 +442,21 @@ pub fn recover(settings: &Settings) {
                 kept.push(item);
                 continue;
             }
-            let moved_copy = match &item.backup {
-                Backup::Moved { file } => std::fs::symlink_metadata(dir.join(&item.dir).join(file)).is_ok(),
-                _ => true,
-            };
-            if moved_copy && !targets::exists(&item.target) {
-                item.pending = false;
-                kept.push(item);
-            } else if moved_copy && matches!(item.backup, Backup::Moved { .. }) {
-                // Partly moved: what was moved is kept to put back.
-                item.pending = false;
-                item.note = Some("Only partly removed – UWiper stopped half-way".into());
-                kept.push(item);
-            } else {
-                let _ = std::fs::remove_dir_all(dir.join(&item.dir));
+            match interrupted(&item, &dir) {
+                Interrupted::Done => {
+                    item.pending = false;
+                    kept.push(item);
+                }
+                // What was removed is kept to put back.
+                Interrupted::Partly => {
+                    item.pending = false;
+                    item.partial = true;
+                    item.note = Some("Only partly removed – UWiper stopped half-way".into());
+                    kept.push(item);
+                }
+                Interrupted::NotStarted => {
+                    let _ = std::fs::remove_dir_all(dir.join(&item.dir));
+                }
             }
         }
         batch.items = kept;
@@ -368,6 +478,7 @@ pub fn list(settings: &Settings) -> Vec<Batch> {
 
 pub fn restore(settings: &Settings, id: &str) -> Result<RestoreReport> {
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _other_copies = process_lock(&root(settings), true)?;
     let dir = batch_dir(settings, id)?;
     let mut batch = load(&dir).ok_or(Error::Other("This batch can't be read".into()))?;
     let mut report = RestoreReport::default();
@@ -376,7 +487,7 @@ pub fn restore(settings: &Settings, id: &str) -> Result<RestoreReport> {
     // Last removed, first restored: a folder comes back before what was inside it.
     for item in batch.items.drain(..).rev() {
         let item_dir = dir.join(&item.dir);
-        match targets::restore(&item.target, &item.backup, &item_dir) {
+        match targets::restore(&item.target, &item.backup, &item_dir, item.partial) {
             Ok(()) => {
                 log.push(format!("  restored {}", targets::describe(&item.target)));
                 report.restored += 1;
@@ -406,6 +517,7 @@ pub fn restore(settings: &Settings, id: &str) -> Result<RestoreReport> {
 
 pub fn delete(settings: &Settings, id: &str) -> Result<()> {
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _other_copies = process_lock(&root(settings), true)?;
     let dir = batch_dir(settings, id)?;
     let title = load(&dir).map(|b| b.title).unwrap_or_default();
     std::fs::remove_dir_all(&dir)?;
@@ -455,6 +567,81 @@ pub async fn delete_batch(state: State<'_, AppState>, id: String) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_settings(name: &str) -> (Settings, PathBuf) {
+        let root = std::env::temp_dir().join(format!("uwiper-{name}-{}", std::process::id()));
+        let mut settings = Settings::default();
+        settings.storage.one_folder = false;
+        settings.storage.quarantine = Some(root.join("q").to_string_lossy().into_owned());
+        settings.storage.logs = Some(root.join("logs").to_string_lossy().into_owned());
+        (settings, root)
+    }
+
+    #[test]
+    fn waits_for_another_copy_of_uwiper() {
+        let (settings, root) = temp_settings("lock");
+        let held = process_lock(&super::root(&settings), false).unwrap();
+        assert!(held.is_some());
+        assert!(
+            process_lock(&super::root(&settings), false).is_err(),
+            "the other copy is busy"
+        );
+        drop(held);
+        assert!(process_lock(&super::root(&settings), false).unwrap().is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn driver_packages_go_only_when_surely_unused() {
+        let item = Removal {
+            label: "oem12.inf".into(),
+            target: Target::Driver {
+                inf: "oem12.inf".into(),
+            },
+            size_bytes: 0,
+            check: None,
+        };
+        assert!(driver_unused(&item).is_err(), "never without a check from the scan");
+        let item = Removal {
+            check: Some("d:x:unknown".into()),
+            ..item
+        };
+        assert!(driver_unused(&item).is_err(), "nor when UWiper can't tell now");
+    }
+
+    #[test]
+    fn tells_how_far_an_interrupted_move_got() {
+        let (_, root) = temp_settings("crash");
+        let batch = root.join("batch");
+        let original = root.join("App");
+        std::fs::create_dir_all(batch.join("000")).unwrap();
+        std::fs::create_dir_all(&original).unwrap();
+        let item = Item {
+            label: "App".into(),
+            target: Target::Path {
+                path: original.to_string_lossy().into_owned(),
+            },
+            backup: Backup::Moved { file: "App".into() },
+            size_bytes: 0,
+            dir: "000".into(),
+            note: None,
+            pending: true,
+            partial: false,
+            before: None,
+        };
+        // A copy across drives that stopped half-way is still under its temporary name.
+        std::fs::create_dir_all(batch.join("000/App.uwiper-partial")).unwrap();
+        assert_eq!(interrupted(&item, &batch), Interrupted::NotStarted);
+        std::fs::rename(batch.join("000/App.uwiper-partial"), batch.join("000/App")).unwrap();
+        assert_eq!(
+            interrupted(&item, &batch),
+            Interrupted::Partly,
+            "copied, originals not all gone"
+        );
+        std::fs::remove_dir_all(&original).unwrap();
+        assert_eq!(interrupted(&item, &batch), Interrupted::Done);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn makes_short_ids() {

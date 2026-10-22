@@ -53,6 +53,11 @@ const app = (
   uninstallString: location ? `"${location}\\uninstall.exe"` : `MsiExec.exe /X{${name.length}A1B2C3-0000-0000-0000-000000000000}`,
   quietUninstallString: null,
   registryKey: `HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${name}`,
+  component: name.startsWith('Microsoft Edge')
+    ? 'Part of Windows – Windows and many apps show web pages with it'
+    : name.startsWith('Microsoft Visual C++')
+      ? 'A runtime other apps need – removing it can break them'
+      : null,
 });
 
 let apps: InstalledApp[] = [
@@ -60,6 +65,7 @@ let apps: InstalledApp[] = [
   app('Discord', 'Discord Inc.', '1.0.9168', 512, '2026-08-02', 'C:\\Users\\you\\AppData\\Local\\Discord', 'win32', 'user'),
   app('Docker Desktop', 'Docker Inc.', '4.44.3', 3280, '2026-10-02', 'C:\\Program Files\\Docker\\Docker'),
   app('Git', 'The Git Development Community', '2.51.0', 330, '2026-09-14', 'C:\\Program Files\\Git'),
+  app('Microsoft Edge', 'Microsoft Corporation', '141.0.3537.71', 790, '2026-10-16', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application'),
   app('Logitech G HUB', 'Logitech', '2025.6.7', 640, '2026-04-22', 'C:\\Program Files\\LGHUB'),
   app('Node.js', 'Node.js Foundation', '22.22.0', 98, '2026-07-30', 'C:\\Program Files\\nodejs\\', 'msi'),
   app('Notepad++ (64-bit x64)', 'Notepad++ Team', '8.7.9', 18, '2026-06-08', 'C:\\Program Files\\Notepad++'),
@@ -387,10 +393,18 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
         return null;
       }
       case 'get_settings': return settings;
+      case 'settings_notice': return null;
       case 'save_settings': settings = args?.settings as Settings; return settings;
       case 'storage_info': return storage();
       case 'create_restore_point': return { created: true, message: 'Restore point created' };
-      case 'start_uninstall': uninstalling = { id: args?.id as string, at: Date.now() }; return null;
+      case 'start_uninstall': {
+        const target = apps.find((a) => a.id === args?.id);
+        if (target?.component && settings.safety.protectSystem) {
+          throw `${target.component}. To uninstall it anyway, turn off «Protect Windows and Microsoft components» in Settings.`;
+        }
+        uninstalling = { id: args?.id as string, at: Date.now() };
+        return null;
+      }
       case 'uninstall_finished': {
         const done = !!uninstalling && uninstalling.id === args?.id && Date.now() - uninstalling.at > 2500;
         if (done) apps = apps.filter((a) => a.id !== args?.id);
@@ -410,7 +424,7 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
         const ids = args?.ids as string[];
         const freedBytes = cleanup.filter((c) => ids.includes(c.id)).reduce((s, c) => s + c.sizeBytes, 0);
         cleanup = cleanup.map((c) => (ids.includes(c.id) ? { ...c, sizeBytes: 0, fileCount: 0 } : c));
-        return { freedBytes: Math.round(freedBytes * 0.94), skippedFiles: 37, deniedFiles: 0, failedFiles: 0, skippedLinks: 0 };
+        return { freedBytes: Math.round(freedBytes * 0.94), skippedFiles: 37, deniedFiles: 0, failedFiles: 0, skippedLinks: 0, unreadableFolders: 0, refused: [] };
       }
       default: throw new Error('Not available in the browser preview');
     }

@@ -38,8 +38,38 @@ pub struct InstalledApp {
     pub(crate) uninstall_string: Option<String>,
     pub(crate) quiet_uninstall_string: Option<String>,
     registry_key: String,
+    /// Set for Microsoft software that Windows and other apps rely on, saying
+    /// why: with "Protect Windows components" on it isn't uninstalled.
+    pub(crate) component: Option<&'static str>,
     #[serde(skip)]
     pub(crate) display_icon: Option<String>,
+}
+
+/// Microsoft software that Windows and other apps rely on: Edge and its
+/// WebView2 runtime, the Visual C++, .NET and Windows App runtimes. Their
+/// own uninstallers remove them – and nothing in quarantine brings back
+/// what then breaks.
+pub(crate) fn windows_component(name: &str, publisher: Option<&str>) -> Option<&'static str> {
+    if !publisher.is_some_and(|p| p.trim().to_lowercase().starts_with("microsoft")) {
+        return None;
+    }
+    let n = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| n.contains(w));
+    if n.starts_with("microsoft edge") {
+        return Some("Part of Windows – Windows and many apps show web pages with it");
+    }
+    let runtime = (has(&["visual c++"]) && has(&["redistributable", "runtime"]))
+        || (has(&[".net"]) && has(&["runtime", "framework", "host"]) && !has(&["sdk"]))
+        || has(&[
+            "desktop runtime",
+            "windows app runtime",
+            "windows app sdk",
+            "directx",
+            "gameinput",
+            "xna framework",
+            "update health tools",
+        ]);
+    runtime.then_some("A runtime other apps need – removing it can break them")
 }
 
 /// Lists installed apps with their real size and icon, so nothing changes
@@ -404,6 +434,7 @@ mod imp {
             uninstall_string,
             quiet_uninstall_string,
             registry_key: format!(r"{hive}\{UNINSTALL}\{key_name}{view_suffix}"),
+            component: windows_component(&name, text("Publisher").as_deref()),
             name,
         })
     }
@@ -412,6 +443,23 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn knows_windows_components() {
+        let ms = Some("Microsoft Corporation");
+        assert!(windows_component("Microsoft Edge", ms).is_some());
+        assert!(windows_component("Microsoft Edge WebView2 Runtime", ms).is_some());
+        assert!(windows_component("Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.44.35211", ms).is_some());
+        assert!(windows_component("Microsoft Windows Desktop Runtime - 8.0.20 (x64)", ms).is_some());
+        assert!(windows_component("Microsoft .NET Runtime - 9.0.9 (x64)", ms).is_some());
+        assert!(
+            windows_component("Microsoft .NET SDK 9.0.305 (x64)", ms).is_none(),
+            "an SDK is a developer's tool"
+        );
+        assert!(windows_component("Microsoft OneDrive", ms).is_none());
+        assert!(windows_component("Microsoft Teams", ms).is_none());
+        assert!(windows_component("Microsoft Edge", Some("Someone Else")).is_none());
+    }
 
     #[test]
     fn parses_install_dates() {

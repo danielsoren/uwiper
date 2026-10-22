@@ -754,6 +754,28 @@ fn install_tokens(app: Option<&AppInfo>, installer: Option<&str>) -> Vec<String>
                     "release",
                     "full",
                     "v",
+                    "data",
+                    "driver",
+                    "drivers",
+                    "launcher",
+                    "update",
+                    "updater",
+                    "web",
+                    "online",
+                    "offline",
+                    "bootstrapper",
+                    "client",
+                    "app",
+                    "arm64",
+                    "64bit",
+                    "32bit",
+                    "stable",
+                    "latest",
+                    "beta",
+                    "user",
+                    "machine",
+                    "msi",
+                    "exe",
                 ]
                 .contains(w)
             })
@@ -846,14 +868,21 @@ fn draft(
             _ => e.program.as_deref().map(canonical),
         })
         .collect();
+    let in_new_or_main = |path: &str| {
+        new_dirs.iter().any(|d| is_within(path, d))
+            || main_dir.as_deref().is_some_and(|d| !d.is_empty() && is_within(path, d))
+    };
     let linked = |e: &Entry| -> bool {
-        let last = match &e.target {
-            Target::Path { path } | Target::RegistryKey { key: path } => path
-                .trim_end_matches('\\')
+        let last_of = |path: &str| {
+            path.trim_end_matches('\\')
                 .rsplit('\\')
                 .next()
                 .unwrap_or_default()
-                .to_string(),
+                .to_string()
+        };
+        let last = match &e.target {
+            Target::Path { path } | Target::RegistryKey { key: path } | Target::Task { path } => last_of(path),
+            Target::RegistryValue { name, .. } | Target::Service { name } => name.clone(),
             _ => return false,
         };
         let stem = last.rsplit_once('.').map_or(last.as_str(), |(s, _)| s);
@@ -862,6 +891,17 @@ fn draft(
         }
         let Target::Path { path } = &e.target else { return false };
         let here = canonical(path);
+        // A shortcut is the app's when it opens something the install added.
+        if e.kind == "shortcut" {
+            let target = std::fs::read(path)
+                .ok()
+                .filter(|b| b.len() < 1 << 20)
+                .and_then(|b| crate::orphans::shortcut_target(&b))
+                .map(|t| canonical(&t));
+            if target.is_some_and(|t| in_new_or_main(&t)) {
+                return true;
+            }
+        }
         main_dir
             .as_deref()
             .is_some_and(|d| !d.is_empty() && (is_within(d, &here) || is_within(&here, d)))
@@ -880,14 +920,14 @@ fn draft(
                 // it runs something the installer added, and never when it runs
                 // something of an app that came along.
                 let in_also = also.iter().any(|a| inside(a.location.as_deref(), &program));
-                e.sure = !in_also
-                    && (new_dirs.iter().any(|d| is_within(&program, d))
-                        || main_dir
-                            .as_deref()
-                            .is_some_and(|d| !d.is_empty() && is_within(&program, d)));
-            } else if e.sure && matches!(e.kind, "folder" | "file" | "shortcut" | "registry") {
+                e.sure = !in_also && in_new_or_main(&program);
+            } else if let (true, Target::PathEntry { entry, .. }) = (e.sure, &e.target) {
+                // A PATH entry is when it points into what the install added.
+                e.sure = in_new_or_main(&canonical(&crate::util::expand_env(entry.trim().trim_matches('"'))));
+            } else if e.sure {
                 // Appearing during the install isn't proof on its own: another
-                // app may have made it at the same time.
+                // app may have made it at the same time. Nor is a service or
+                // task with no program to point at.
                 e.sure = linked(&e);
             }
             if long_window {
@@ -900,7 +940,7 @@ fn draft(
     items.sort_by(|a, b| (!a.sure, a.kind, a.key.as_str()).cmp(&(!b.sure, b.kind, b.key.as_str())));
 
     let sizes = parallel_map(&items, |e| match &e.target {
-        Target::Path { path } => Some(dir_stats(Path::new(path)).0),
+        Target::Path { path } => Some(dir_stats(Path::new(path)).bytes),
         _ => None,
     });
     let out: Vec<DraftItem> = items
@@ -1159,7 +1199,7 @@ pub(crate) fn add_to(found: &mut Found, trace: &Trace, other_folders: &[String])
         // An app's data folder that changed since may hold the user's own files.
         let changed_data = item.sure
             && matches!(&item.target, Target::Path { path } if in_data_place(path)
-                && dir_stats(Path::new(path)).2.is_some_and(|newest| newest > trace.finished_at + 60));
+                && dir_stats(Path::new(path)).newest.is_some_and(|newest| newest > trace.finished_at + 60));
         let confidence = if item.sure && !changed_data { "high" } else { "medium" };
         let reason = if changed_data {
             format!("Added when it was installed, and changed since – it may hold your data. Tracked {date}")

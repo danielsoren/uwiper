@@ -263,6 +263,12 @@ impl Guard {
 /// Folders that hold many things: removing one of them, or anything that
 /// contains one, is never right.
 fn protected_folders() -> Vec<String> {
+    shared_folders(true)
+}
+
+/// The user's own folders and Windows': `protected_folders`, with or without
+/// TEMP – which cleaning does empty.
+pub(crate) fn shared_folders(with_temp: bool) -> Vec<String> {
     let vars = [
         "SystemRoot",
         "ProgramFiles",
@@ -280,7 +286,11 @@ fn protected_folders() -> Vec<String> {
         "TEMP",
         "OneDrive",
     ];
-    let mut out: Vec<String> = vars.iter().filter_map(|v| std::env::var(v).ok()).collect();
+    let mut out: Vec<String> = vars
+        .iter()
+        .filter(|v| with_temp || **v != "TEMP")
+        .filter_map(|v| std::env::var(v).ok())
+        .collect();
     if let Ok(drive) = std::env::var("SystemDrive") {
         out.push(format!(r"{drive}\Users"));
     }
@@ -427,14 +437,17 @@ fn same_entry(a: &str, b: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Files and folders. These work on every OS so they can be tested anywhere.
 
-/// Moves a file or folder, copying when it has to cross drives. A copy that
-/// fails half-way is undone; the original is removed only after a full copy.
-/// `Ok(false)` means everything was copied but some originals were in use
-/// and stayed behind.
+/// Moves a file or folder, copying when it has to cross drives. A copy goes
+/// under a temporary name first and gets its real name only once all of it
+/// is on the disk, so a half-done copy is never taken for a whole one; the
+/// original is removed only after that. `Ok(false)` means everything was
+/// copied but some originals were in use and stayed behind.
 pub fn move_path(from: &Path, to: &Path) -> Result<bool> {
     if let Some(parent) = to.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // Nothing on the way may be swapped for a link while it's moved.
+    let _pins = crate::util::pin_parents(from).map_err(blocked)?;
     // Moving to another drive: ERROR_NOT_SAME_DEVICE on Windows, EXDEV elsewhere.
     const CROSS_DEVICE: i32 = if cfg!(windows) { 17 } else { 18 };
     match std::fs::rename(from, to) {
@@ -442,11 +455,35 @@ pub fn move_path(from: &Path, to: &Path) -> Result<bool> {
         Err(e) if e.raw_os_error() == Some(CROSS_DEVICE) => {}
         Err(e) => return Err(friendly_io(e)),
     }
-    if let Err(e) = copy_all(from, to) {
-        let _ = remove_path(to);
+    let name = to
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let staging = (1..)
+        .map(|n| {
+            to.with_file_name(format!(
+                "{name}.uwiper-partial{}",
+                if n == 1 { String::new() } else { format!("-{n}") }
+            ))
+        })
+        .find(|p| std::fs::symlink_metadata(p).is_err())
+        .unwrap_or_else(|| to.with_file_name(format!("{name}.uwiper-partial")));
+    if let Err(e) = copy_all(from, &staging).and_then(|()| std::fs::rename(&staging, to)) {
+        let _ = remove_path(&staging);
         return Err(friendly_io(e));
     }
     Ok(remove_path(from).is_ok())
+}
+
+pub(crate) fn blocked(why: crate::util::Blocked) -> Error {
+    Error::Other(
+        match why {
+            crate::util::Blocked::Link => "It's reached through a link or junction, so it's left alone",
+            crate::util::Blocked::Gone => "Already gone",
+            crate::util::Blocked::Unreadable => "A folder on the way to it can't be opened",
+        }
+        .into(),
+    )
 }
 
 /// Moves what's in `from` into the existing folder `to`. Files already there
@@ -469,14 +506,16 @@ fn merge_into(from: &Path, to: &Path) -> Result<usize> {
     Ok(conflicts)
 }
 
+/// Copies a file or folder, each file flushed to the disk before the next.
 fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(from)?;
+    let link = || std::io::Error::other("It holds a link or junction, so it can only be moved within its own drive");
     if meta.file_type().is_symlink() {
-        return Err(std::io::Error::other(
-            "It holds a link or junction, so it can only be moved within its own drive",
-        ));
+        return Err(link());
     }
     if meta.is_dir() {
+        // Held open while it's read, so it can't turn into a link half-way.
+        let _pin = crate::util::pin_dir(from).map_err(|_| link())?;
         std::fs::create_dir_all(to)?;
         for entry in std::fs::read_dir(from)? {
             let entry = entry?;
@@ -484,7 +523,8 @@ fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
         }
         Ok(())
     } else {
-        std::fs::copy(from, to).map(|_| ())
+        std::fs::copy(from, to)?;
+        crate::util::flush_file(to)
     }
 }
 
@@ -562,49 +602,71 @@ pub fn exists(target: &Target) -> bool {
 /// removed that changed since the scan that offered it.
 pub fn fingerprint(target: &Target) -> Option<String> {
     match target {
-        Target::Path { path } => {
-            let (bytes, files, newest) = crate::util::dir_stats(Path::new(path));
-            Some(path_fingerprint(bytes, files, newest))
-        }
+        Target::Path { path } => Some(path_fingerprint(&crate::util::dir_stats(Path::new(path)))),
         _ => imp::fingerprint(target),
     }
 }
 
-pub fn path_fingerprint(bytes: u64, files: u64, newest: Option<u64>) -> String {
-    format!("p:{files}:{bytes}:{}", newest.unwrap_or(0))
+pub fn path_fingerprint(stats: &crate::util::DirStats) -> String {
+    format!(
+        "p:{}:{}:{}:{}",
+        stats.files,
+        stats.bytes,
+        stats.newest_file.unwrap_or(0),
+        stats.dirs
+    )
 }
 
-/// True when the target is as it was when `check` was taken. A folder that
-/// only lost files (an uninstaller still finishing) counts as the same.
+/// Adds why a find was offered to its fingerprint: the program, shortcut
+/// target or folder that's gone. Should one come back, the find is stale.
+pub fn with_gone(check: Option<String>, gone: &[String]) -> Option<String> {
+    let mut check = check?;
+    for path in gone {
+        check.push_str("|gone:");
+        check.push_str(path);
+    }
+    Some(check)
+}
+
+/// True when the target is as it was when `check` was taken, and what was
+/// gone then still is. A folder that only lost files – an uninstaller still
+/// finishing – counts as the same: no more files, folders or bytes, and no
+/// file made or written since.
 pub fn unchanged(target: &Target, check: &str) -> bool {
+    let mut parts = check.split("|gone:");
+    let print = parts.next().unwrap_or_default();
+    // "Gone" only counts when it's surely gone; an unplugged drive can't tell.
+    if parts.any(|path| crate::util::file_state(path) != Some(false)) {
+        return false;
+    }
     let Some(now) = fingerprint(target) else {
         return false;
     };
-    let parse = |f: &str| -> Option<(u64, u64)> {
-        let mut parts = f.strip_prefix("p:")?.split(':');
-        let files = parts.next()?.parse().ok()?;
-        let _bytes = parts.next()?;
-        let newest = parts.next()?.parse().ok()?;
-        Some((files, newest))
+    let parse = |f: &str| -> Option<[u64; 4]> {
+        let mut it = f.strip_prefix("p:")?.split(':').map(|n| n.parse::<u64>().ok());
+        Some([it.next()??, it.next()??, it.next()??, it.next()??])
     };
-    match (parse(check), parse(&now)) {
-        (Some((files_then, newest_then)), Some((files_now, newest_now))) => {
-            files_now <= files_then && newest_now <= newest_then
-        }
-        _ => now == check,
+    match (parse(print), parse(&now)) {
+        (Some(then), Some(now)) => now.iter().zip(then).all(|(n, t)| *n <= t),
+        _ => now == print,
     }
 }
 
 /// Removes the target for good.
 pub fn delete(target: &Target) -> Result<()> {
     match target {
-        Target::Path { path } => remove_path(Path::new(path)).map_err(friendly_io),
+        Target::Path { path } => {
+            let path = Path::new(path);
+            let _pins = crate::util::pin_parents(path).map_err(blocked)?;
+            remove_path(path).map_err(friendly_io)
+        }
         _ => imp::delete(target),
     }
 }
 
-/// Puts a quarantined target back.
-pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
+/// Puts a quarantined target back. `partial` says it was only partly
+/// removed, so what's left of it is no sign of a reinstall.
+pub fn restore(target: &Target, backup: &Backup, dir: &Path, partial: bool) -> Result<()> {
     match (target, backup) {
         (Target::Path { path }, Backup::Moved { file }) => {
             let (stored, original) = (dir.join(file), PathBuf::from(path));
@@ -624,7 +686,7 @@ pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
                 Ok(_) => Err(Error::Other("Something new is already at the original location".into())),
             }
         }
-        _ => imp::restore(target, backup, dir),
+        _ => imp::restore(target, backup, dir, partial),
     }
 }
 
@@ -668,7 +730,7 @@ mod imp {
         Err(Error::Unsupported)
     }
 
-    pub fn restore(_target: &Target, _backup: &Backup, _dir: &Path) -> Result<()> {
+    pub fn restore(_target: &Target, _backup: &Backup, _dir: &Path, _partial: bool) -> Result<()> {
         Err(Error::Unsupported)
     }
 }
@@ -717,6 +779,7 @@ mod imp {
             Target::RegistryKey { key } => {
                 let file = "key.reg";
                 export(key, &dir.join(file))?;
+                crate::util::flush_file(&dir.join(file))?;
                 Ok(Backup::Reg { file: file.into() })
             }
             Target::RegistryValue { key, name } => {
@@ -731,11 +794,13 @@ mod imp {
             Target::Service { name } => {
                 let file = "service.reg";
                 export(&service_key(name), &dir.join(file))?;
+                crate::util::flush_file(&dir.join(file))?;
                 Ok(Backup::Reg { file: file.into() })
             }
             Target::Task { path } => {
                 let file = "task.xml";
                 std::fs::copy(task_file(path), dir.join(file)).map_err(friendly_io)?;
+                crate::util::flush_file(&dir.join(file))?;
                 Ok(Backup::TaskXml { file: file.into() })
             }
             Target::PathEntry { scope, entry } => {
@@ -747,6 +812,11 @@ mod imp {
                 let folder = dir.join("driver");
                 std::fs::create_dir_all(&folder)?;
                 run_tool("pnputil.exe", &["/export-driver", inf, &folder.to_string_lossy()])?;
+                for file in walkdir::WalkDir::new(&folder).into_iter().flatten() {
+                    if file.file_type().is_file() {
+                        crate::util::flush_file(file.path())?;
+                    }
+                }
                 // Only once the package's own INF is in the export can it be put back.
                 exported_inf(&folder, driver_original_inf(inf).as_deref())
                     .map(|file| Backup::Driver { inf: file })
@@ -764,6 +834,11 @@ mod imp {
                 .err()
                 .map(|e| format!("Only partly removed ({e}) – its backup is kept"))),
             Target::Driver { inf } => delete_driver(inf),
+            // A service something still holds open is only marked for deletion.
+            Target::Service { .. } => {
+                delete(target)?;
+                Ok(exists(target).then(|| "Windows finishes removing it at the next restart".to_string()))
+            }
             _ => delete(target).map(|_| None),
         }
     }
@@ -968,20 +1043,35 @@ mod imp {
         }
     }
 
-    pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
+    pub fn restore(target: &Target, backup: &Backup, dir: &Path, partial: bool) -> Result<()> {
         // A reinstalled app has its own settings, service or task by now:
-        // merging the old ones in could break it.
-        let back_again = matches!(
-            target,
-            Target::RegistryKey { .. } | Target::RegistryValue { .. } | Target::Service { .. } | Target::Task { .. }
-        ) && exists(target);
+        // merging the old ones in could break it. What's left of a partly
+        // removed one is just filled in again.
+        let back_again = !partial
+            && matches!(
+                target,
+                Target::RegistryKey { .. }
+                    | Target::RegistryValue { .. }
+                    | Target::Service { .. }
+                    | Target::Task { .. }
+            )
+            && exists(target);
         if back_again {
             return Err(Error::Other(
                 "It's there again (reinstalled?) – the quarantined copy is kept".into(),
             ));
         }
         match (target, backup) {
-            (Target::RegistryKey { .. } | Target::Service { .. }, Backup::Reg { file }) => import(&dir.join(file)),
+            (Target::Service { name }, Backup::Reg { file }) => {
+                // Marked for deletion: without the mark Windows keeps it at the next start.
+                if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE)
+                    .open_subkey_with_flags(format!(r"SYSTEM\CurrentControlSet\Services\{name}"), KEY_SET_VALUE)
+                {
+                    let _ = key.delete_value("DeleteFlag");
+                }
+                import(&dir.join(file))
+            }
+            (Target::RegistryKey { .. }, Backup::Reg { file }) => import(&dir.join(file)),
             (Target::RegistryValue { key, name }, Backup::Value { vtype, data }) => {
                 let (h, sub) = split_key(key).ok_or(Error::Other("Not a registry key".into()))?;
                 let (reg, _) = hive(h).create_subkey(sub).map_err(registry_error)?;
@@ -1018,6 +1108,40 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_that_only_lost_files_is_unchanged() {
+        let dir = std::env::temp_dir().join(format!("uwiper-check-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("a.bin"), [1u8; 10]).unwrap();
+        std::fs::write(dir.join("data/b.bin"), [2u8; 10]).unwrap();
+        let target = Target::Path {
+            path: dir.to_string_lossy().into_owned(),
+        };
+        let check = fingerprint(&target).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::remove_file(dir.join("data/b.bin")).unwrap();
+        assert!(unchanged(&target, &check), "an uninstaller still finishing");
+        std::fs::write(dir.join("new.bin"), [3u8; 1]).unwrap();
+        assert!(!unchanged(&target, &check), "something new came in");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_find_is_stale_once_what_was_gone_is_back() {
+        let dir = std::env::temp_dir().join(format!("uwiper-gone-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("shortcut.lnk"), b"lnk").unwrap();
+        let target = Target::Path {
+            path: dir.join("shortcut.lnk").to_string_lossy().into_owned(),
+        };
+        let program = dir.join("app.exe").to_string_lossy().into_owned();
+        let check = with_gone(fingerprint(&target), std::slice::from_ref(&program)).unwrap();
+        assert!(unchanged(&target, &check));
+        std::fs::write(&program, b"exe").unwrap();
+        assert!(!unchanged(&target, &check), "its program is back");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>)> {
         let backup = back_up(target, dir)?;
@@ -1184,16 +1308,19 @@ mod tests {
         // The app came back meanwhile: restoring keeps its files and adds the rest.
         std::fs::create_dir_all(&original).unwrap();
         std::fs::write(original.join("new.txt"), b"new").unwrap();
-        restore(&target, &backup, &batch).unwrap();
+        restore(&target, &backup, &batch, false).unwrap();
         assert_eq!(std::fs::read(original.join("sub/a.txt")).unwrap(), b"hello");
         assert_eq!(std::fs::read(original.join("new.txt")).unwrap(), b"new");
-        assert!(restore(&target, &backup, &batch).is_err(), "nothing left to restore");
+        assert!(
+            restore(&target, &backup, &batch, false).is_err(),
+            "nothing left to restore"
+        );
 
         // A file that came back meanwhile wins, and the quarantined copy is kept.
         let (backup, _) = quarantine(&target, &batch).unwrap();
         std::fs::create_dir_all(original.join("sub")).unwrap();
         std::fs::write(original.join("sub/a.txt"), b"newer").unwrap();
-        assert!(restore(&target, &backup, &batch).is_err());
+        assert!(restore(&target, &backup, &batch, false).is_err());
         assert_eq!(std::fs::read(original.join("sub/a.txt")).unwrap(), b"newer");
         assert_eq!(std::fs::read(original.join("new.txt")).unwrap(), b"new");
         assert_eq!(std::fs::read(batch.join("App/sub/a.txt")).unwrap(), b"hello");

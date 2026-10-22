@@ -88,13 +88,16 @@ export function CleanDialog({ items, onClose }: { items: CleanupItem[]; onClose:
           <Icon name="check" size={28} stroke={2.4} />
         </span>
         <h2 className="text-h2 font-bold">{report.freedBytes > 0 ? `${formatBytes(report.freedBytes)} freed` : 'Nothing to free'}</h2>
-        {report.skippedFiles + report.deniedFiles + report.failedFiles + report.skippedLinks > 0 && (
+        {report.skippedFiles + report.deniedFiles + report.failedFiles + report.skippedLinks + report.unreadableFolders + report.refused.length > 0 && (
           <Note>
             {[
               report.skippedFiles > 0 && `${plural(report.skippedFiles, 'file was', 'files were')} in use – close the apps that use them and clean again.`,
               report.deniedFiles > 0 && `Windows didn't let UWiper delete ${plural(report.deniedFiles, 'file', 'files')}.`,
               report.failedFiles > 0 && `${plural(report.failedFiles, 'file', 'files')} couldn't be deleted.`,
               report.skippedLinks > 0 && `${plural(report.skippedLinks, 'folder was', 'folders were')} left alone: ${report.skippedLinks > 1 ? 'they lead' : 'it leads'} through a link elsewhere.`,
+              report.unreadableFolders > 0 && `${plural(report.unreadableFolders, 'folder', 'folders')} couldn't be opened.`,
+              report.refused.length > 0 &&
+                `${report.refused.join(', ')} ${report.refused.length > 1 ? 'hold' : 'holds'} your own files, so ${report.refused.length > 1 ? 'they were' : 'it was'} left alone – check where %TEMP% points.`,
             ]
               .filter(Boolean)
               .join(' ')}

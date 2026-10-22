@@ -125,6 +125,15 @@ impl Owners {
                 for part in parts.get(start + 1..end).unwrap_or_default() {
                     add(squash(part));
                 }
+            } else if !crate::util::is_windows_path(program) {
+                // A portable program (D:\Tools\Obsidian\Obsidian.exe) keeps its
+                // data under its own name or its folder's.
+                if let Some(parent) = path.parent() {
+                    add(squash(&clean_name(&file_name(parent))));
+                }
+                if !crate::icons::is_helper_exe(path) {
+                    add(squash(&crate::icons::stem(path)));
+                }
             }
         }
         folders.retain(|f| !f.is_empty());
@@ -364,11 +373,13 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             .filter(|s| s.file_exists == Some(true))
             .filter_map(|s| s.binary.clone()),
     );
+    // Every program a task runs, not just its first action's.
     programs.extend(
         tasks
             .iter()
-            .filter(|t| t.file_exists == Some(true))
-            .filter_map(|t| t.binary.clone()),
+            .flat_map(|t| &t.programs)
+            .filter(|p| program_state(p) == Some(true))
+            .cloned(),
     );
     // Programs running right now, portable ones too, claim their folders.
     programs.extend(imp::running_programs());
@@ -389,19 +400,19 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             continue;
         };
         match presence(app) {
-            Presence::Gone => {
+            Presence::Gone(gone) => {
                 let reason = format!(
                     "«{}» is listed as installed, but its uninstaller and folder are gone",
                     app.name
                 );
-                found.add("app", Target::RegistryKey { key }, &reason, "high");
+                found.add_gone("app", Target::RegistryKey { key }, &reason, "high", gone);
             }
-            Presence::UninstallerGone => {
+            Presence::UninstallerGone(gone) => {
                 let reason = format!(
                     "«{}» is listed as installed, but its uninstaller is gone – the app may still be there",
                     app.name
                 );
-                found.add("app", Target::RegistryKey { key }, &reason, "low");
+                found.add_gone("app", Target::RegistryKey { key }, &reason, "low", gone);
             }
             Presence::Fine => {}
         }
@@ -415,7 +426,7 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             continue;
         };
         let reason = format!("«{}» starts a program that no longer exists", item.name);
-        found.add("startup", removal, &reason, "high");
+        found.add_gone("startup", removal, &reason, "high", item.target.into_iter().collect());
     }
     for service in services
         .into_iter()
@@ -425,13 +436,25 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             "Service «{}» runs a program that no longer exists",
             service.display_name
         );
-        found.add("service", service.removal, &reason, "high");
+        found.add_gone(
+            "service",
+            service.removal,
+            &reason,
+            "high",
+            service.binary.into_iter().collect(),
+        );
     }
     for task in tasks
         .into_iter()
         .filter(|t| t.file_exists == Some(false) && !t.is_windows)
     {
-        found.add("task", task.removal, "Runs a program that no longer exists", "high");
+        found.add_gone(
+            "task",
+            task.removal,
+            "Runs a program that no longer exists",
+            "high",
+            task.programs,
+        );
     }
 
     // Shortcuts to things that are gone, and Start menu folders left empty.
@@ -458,8 +481,18 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
                 .ok()
                 .filter(|b| b.len() < 1 << 20)
                 .and_then(|b| shortcut_target(&b));
-            if let Some(target) = target.filter(|t| is_gone(t) == Some(true)) {
-                found.add_path(path, &format!("Points to {target}, which no longer exists"), "high");
+            if let Some(target_text) = target.filter(|t| is_gone(t) == Some(true)) {
+                let target = Target::Path {
+                    path: path.to_string_lossy().into_owned(),
+                };
+                let gone = vec![expand_env(&target_text)];
+                found.add_gone(
+                    "shortcut",
+                    target,
+                    &format!("Points to {target_text}, which no longer exists"),
+                    "high",
+                    gone,
+                );
             }
         }
     }
@@ -482,12 +515,13 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             scope: scope.into(),
             entry,
         };
-        found.add("environment", target, &reason, "low");
+        found.add_gone("environment", target, &reason, "low", vec![expanded]);
     }
     for (key, exe) in imp::app_paths() {
         if is_gone(&exe) == Some(true) {
             let reason = format!("Windows still lists {exe} to start by name, but it's gone");
-            found.add("registry", Target::RegistryKey { key }, &reason, "high");
+            let gone = vec![expand_env(exe.trim().trim_matches('"'))];
+            found.add_gone("registry", Target::RegistryKey { key }, &reason, "high", gone);
         }
     }
 
@@ -574,12 +608,13 @@ fn store_app_names() -> Vec<String> {
     out
 }
 
+/// Each with what's gone.
 enum Presence {
     Fine,
     /// The uninstaller is gone, but the app's files may still be there.
-    UninstallerGone,
+    UninstallerGone(Vec<String>),
     /// The uninstaller and the app's folder are both gone.
-    Gone,
+    Gone(Vec<String>),
 }
 
 /// MSI apps are left out: Windows Installer removes them by product code.
@@ -598,10 +633,11 @@ fn presence(app: &InstalledApp) -> Presence {
         let icon = app.display_icon.as_deref().and_then(crate::icons::parse_spec)?;
         icon.0.parent().map(|p| p.to_string_lossy().into_owned())
     });
-    match folder.as_deref().map(is_gone) {
-        Some(Some(true)) => Presence::Gone,
-        Some(Some(false)) => Presence::Fine,
-        _ => Presence::UninstallerGone,
+    let program = expand_env(&program);
+    match folder.as_deref().map(|f| (f, is_gone(f))) {
+        Some((folder, Some(true))) => Presence::Gone(vec![program, expand_env(folder)]),
+        Some((_, Some(false))) => Presence::Fine,
+        _ => Presence::UninstallerGone(vec![program]),
     }
 }
 

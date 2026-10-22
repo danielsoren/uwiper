@@ -131,13 +131,33 @@ pub fn normalize_system_path(path: &str) -> String {
 }
 
 /// `Some(true)` – the file is there, `Some(false)` – it is gone,
-/// `None` – we could not tell (no path, or access was denied).
+/// `None` – we could not tell (a relative path, access denied, or a drive or
+/// network share that isn't there right now).
 pub fn file_state(path: &str) -> Option<bool> {
     match std::fs::metadata(path) {
         Ok(_) => Some(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            volume_root(path).filter(|root| Path::new(root).exists()).map(|_| false)
+        }
         Err(_) => None,
     }
+}
+
+/// `C:\` of `C:\x\y`, `\\server\share\` of a network path; `None` for a
+/// relative path.
+pub fn volume_root(path: &str) -> Option<String> {
+    let p = path.trim().replace('/', "\\");
+    let b = p.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' {
+        return Some(p[..3].to_string());
+    }
+    if let Some(rest) = p.strip_prefix(r"\\") {
+        let mut parts = rest.splitn(3, '\\');
+        let (server, share) = (parts.next()?, parts.next()?);
+        return (!server.is_empty() && !share.is_empty()).then(|| format!(r"\\{server}\{share}\"));
+    }
+    // Tests run on Linux.
+    (cfg!(not(windows)) && path.starts_with('/')).then(|| "/".to_string())
 }
 
 /// Variables that point into the profile of whoever runs the program.
@@ -533,32 +553,207 @@ pub fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -
     results.into_inner().unwrap().into_iter().flatten().collect()
 }
 
-/// Size, file count and the newest change (Unix time) of a file or of
-/// everything in a folder. Links aren't followed.
-pub fn dir_stats(path: &Path) -> (u64, u64, Option<u64>) {
-    let secs = |m: &std::fs::Metadata| {
-        m.modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-    };
+/// The later of when a file was made and last written: an unpacked or copied
+/// file keeps its old write time, but is made just now.
+pub fn fresh_time(meta: &std::fs::Metadata) -> Option<std::time::SystemTime> {
+    meta.created().ok().max(meta.modified().ok())
+}
+
+fn unix_secs(t: Option<std::time::SystemTime>) -> Option<u64> {
+    t.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+}
+
+/// What `dir_stats` finds in a file or folder.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct DirStats {
+    pub bytes: u64,
+    pub files: u64,
+    pub dirs: u64,
+    /// The newest change of anything, folders too (Unix time): what's shown.
+    pub newest: Option<u64>,
+    /// The newest file, made or written (Unix time). Unlike a folder's time,
+    /// it doesn't move when something is deleted.
+    pub newest_file: Option<u64>,
+}
+
+/// Size, counts and the newest changes of a file or of everything in a
+/// folder. Links aren't followed.
+pub fn dir_stats(path: &Path) -> DirStats {
+    let mut stats = DirStats::default();
     let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return (0, 0, None);
+        return stats;
     };
     if !meta.is_dir() {
-        return (meta.len(), 1, secs(&meta));
+        let time = unix_secs(fresh_time(&meta));
+        return DirStats {
+            bytes: meta.len(),
+            files: 1,
+            newest: unix_secs(meta.modified().ok()),
+            newest_file: time,
+            ..stats
+        };
     }
-    let (mut bytes, mut files, mut newest) = (0u64, 0u64, secs(&meta));
-    for entry in walkdir::WalkDir::new(path).follow_links(false).into_iter().flatten() {
+    stats.newest = unix_secs(meta.modified().ok());
+    for entry in walkdir::WalkDir::new(path)
+        .min_depth(1)
+        .follow_links(false)
+        .into_iter()
+        .flatten()
+    {
         if let Ok(m) = entry.metadata() {
-            newest = newest.max(secs(&m));
-            if entry.file_type().is_file() {
-                bytes += m.len();
-                files += 1;
+            stats.newest = stats.newest.max(unix_secs(m.modified().ok()));
+            if entry.file_type().is_dir() {
+                stats.dirs += 1;
+            } else {
+                stats.bytes += m.len();
+                stats.files += 1;
+                stats.newest_file = stats.newest_file.max(unix_secs(fresh_time(&m)));
             }
         }
     }
-    (bytes, files, newest)
+    stats
+}
+
+/// Folders a low-rights user can't swap for a link: the profile's and
+/// Windows' own. Anything below them is checked one by one.
+fn trusted_roots() -> Vec<String> {
+    [
+        "TEMP",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "USERPROFILE",
+        "ProgramData",
+        "SystemRoot",
+    ]
+    .iter()
+    .filter_map(|v| std::env::var(v).ok())
+    .map(|p| norm_path(&p))
+    .filter(|p| !p.is_empty())
+    .collect()
+}
+
+/// Why a folder can't be worked in safely.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Blocked {
+    /// It, or a folder on the way to it, is a link or junction.
+    Link,
+    Gone,
+    Unreadable,
+}
+
+/// Holds a folder open so that, until it's dropped, the folder can't be
+/// renamed, deleted or swapped for a link.
+pub struct Pin {
+    #[cfg(windows)]
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for Pin {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+/// Pins `dir` itself – not what a link points to, unless `follow`.
+#[cfg(windows)]
+fn pin_one(dir: &Path, follow: bool) -> std::result::Result<Pin, Blocked> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    let flags = FILE_FLAG_BACKUP_SEMANTICS | if follow { 0 } else { FILE_FLAG_OPEN_REPARSE_POINT };
+    // Listing access makes the share mode count: without FILE_SHARE_DELETE
+    // nobody else can rename or delete the folder while it's open.
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            flags,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+        return Err(match unsafe { GetLastError() } {
+            2 | 3 => Blocked::Gone,
+            _ => Blocked::Unreadable,
+        });
+    }
+    let pin = Pin { handle };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(pin.handle, &mut info) } == 0 {
+        return Err(Blocked::Unreadable);
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Blocked::Link);
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(Blocked::Unreadable);
+    }
+    Ok(pin)
+}
+
+#[cfg(not(windows))]
+fn pin_one(dir: &Path, follow: bool) -> std::result::Result<Pin, Blocked> {
+    let meta = if follow {
+        std::fs::metadata(dir)
+    } else {
+        std::fs::symlink_metadata(dir)
+    };
+    match meta {
+        Ok(m) if m.file_type().is_symlink() => Err(Blocked::Link),
+        Ok(m) if m.is_dir() => Ok(Pin {}),
+        Ok(_) => Err(Blocked::Unreadable),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Blocked::Gone),
+        Err(_) => Err(Blocked::Unreadable),
+    }
+}
+
+/// Pins a folder that must not be a link.
+pub fn pin_dir(dir: &Path) -> std::result::Result<Pin, Blocked> {
+    pin_one(dir, false)
+}
+
+/// Pins every folder on the way to `path`, from the closest trusted root (or
+/// the drive) down to its parent, so none of them can be swapped for a link
+/// while UWiper works there. Above a trusted root links are fine: a TEMP
+/// moved to another drive is the user's choice.
+pub fn pin_parents(path: &Path) -> std::result::Result<Vec<Pin>, Blocked> {
+    let roots = trusted_roots();
+    let mut chain: Vec<&Path> = Vec::new();
+    let mut top: Option<&Path> = None;
+    let mut current = path.parent();
+    while let Some(p) = current {
+        if roots.contains(&norm_path(&p.to_string_lossy())) || p.parent().is_none() {
+            top = Some(p);
+            break;
+        }
+        chain.push(p);
+        current = p.parent();
+    }
+    let mut pins = Vec::with_capacity(chain.len() + 1);
+    if let Some(top) = top {
+        pins.push(pin_one(top, true)?);
+    }
+    for dir in chain.into_iter().rev() {
+        pins.push(pin_dir(dir)?);
+    }
+    Ok(pins)
+}
+
+/// Flushes a written file to the disk, so it outlasts a power cut that
+/// comes right after.
+pub fn flush_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 /// Total size of all files below `path`, skipping anything unreadable.
@@ -579,6 +774,49 @@ pub fn dir_size(path: &Path) -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_drive_says_nothing_about_a_file() {
+        assert_eq!(volume_root(r"C:\Tools\a.exe").as_deref(), Some(r"C:\"));
+        assert_eq!(volume_root(r"\\nas\share\a.exe").as_deref(), Some(r"\\nas\share\"));
+        assert_eq!(volume_root(r"bin\a.exe"), None);
+        // No Q: drive here: an unplugged USB stick, say.
+        assert_eq!(file_state(r"Q:\Tools\gone.exe"), None);
+        assert_eq!(file_state(r"bin\gone.exe"), None, "a relative path can't be told");
+        assert_eq!(file_state("/surely/not/here.exe"), Some(false));
+    }
+
+    #[test]
+    fn deleting_a_file_leaves_the_newest_file_time() {
+        let dir = std::env::temp_dir().join(format!("uwiper-stats-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"aa").unwrap();
+        std::fs::write(dir.join("sub/b.txt"), b"bbb").unwrap();
+        let before = dir_stats(&dir);
+        assert_eq!((before.files, before.bytes, before.dirs), (2, 5, 1));
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::remove_file(dir.join("sub/b.txt")).unwrap();
+        let after = dir_stats(&dir);
+        assert_eq!((after.files, after.bytes), (1, 2));
+        assert!(
+            after.newest_file <= before.newest_file,
+            "a folder's time moves, a file's doesn't"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pins_refuse_links_on_the_way() {
+        let dir = std::env::temp_dir().join(format!("uwiper-pins-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("real/inner")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        assert!(pin_parents(&dir.join("real/inner/x")).is_ok());
+        assert_eq!(pin_parents(&dir.join("link/inner/x")).err(), Some(Blocked::Link));
+        assert_eq!(pin_dir(&dir.join("link")).err(), Some(Blocked::Link));
+        assert_eq!(pin_dir(&dir.join("nothing")).err(), Some(Blocked::Gone));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn finds_what_hosts_run() {

@@ -19,6 +19,8 @@ export interface InstalledApp {
   uninstallString: string | null;
   quietUninstallString: string | null;
   registryKey: string;
+  /** Why it's one of Windows' own components, which stay while protection is on. */
+  component: string | null;
 }
 
 /** Something UWiper can remove; the backend checks it against the safety rules. */
@@ -107,6 +109,10 @@ export interface CleanReport {
   failedFiles: number;
   /** Folders left alone because they lead through a link or junction. */
   skippedLinks: number;
+  /** Folders UWiper couldn't open. */
+  unreadableFolders: number;
+  /** Folders to clean that hold the user's own files, left alone. */
+  refused: string[];
 }
 
 export interface RestorePoint {
