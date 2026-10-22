@@ -465,6 +465,10 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     };
 
     let mut found = Found::new(guard, other_folders, imp::key_exists(&app.id));
+    // What its installer added, when the install was tracked: these come first.
+    for trace in crate::tracking::traces_for(settings, &app.id) {
+        crate::tracking::add_to(&mut found, &trace);
+    }
     let look = &settings.scan.look_in;
     let quick = settings.scan.depth == "quick";
     let deep = settings.scan.depth == "deep";

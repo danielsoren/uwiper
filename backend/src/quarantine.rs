@@ -83,7 +83,7 @@ fn root(settings: &Settings) -> PathBuf {
     data_dir(settings, "quarantine")
 }
 
-fn slug(title: &str) -> String {
+pub(crate) fn slug(title: &str) -> String {
     let mut out = String::new();
     for ch in title.to_lowercase().chars() {
         if ch.is_ascii_alphanumeric() {

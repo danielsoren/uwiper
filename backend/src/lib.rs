@@ -14,6 +14,7 @@ mod startup;
 mod system;
 mod targets;
 mod tasks;
+mod tracking;
 mod uninstall;
 mod util;
 
@@ -57,6 +58,15 @@ pub fn run() {
             tasks::list_tasks,
             tasks::set_task_enabled,
             drivers::list_drivers,
+            tracking::tracking_status,
+            tracking::start_tracking,
+            tracking::launch_installer,
+            tracking::finish_tracking,
+            tracking::save_trace,
+            tracking::cancel_tracking,
+            tracking::list_traces,
+            tracking::delete_trace,
+            tracking::trace_leftovers,
             settings::get_settings,
             settings::save_settings,
             paths::storage_info,
