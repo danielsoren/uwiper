@@ -16,7 +16,7 @@ pub struct StartupItem {
     location: String,
     /// The program it starts.
     pub(crate) target: Option<String>,
-    file_exists: Option<bool>,
+    pub(crate) file_exists: Option<bool>,
     enabled: bool,
     pub(crate) is_windows: bool,
     /// What to remove to take it out of startup.

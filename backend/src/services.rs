@@ -13,7 +13,7 @@ pub struct ServiceItem {
     pub(crate) name: String,
     pub(crate) display_name: String,
     pub(crate) binary: Option<String>,
-    file_exists: Option<bool>,
+    pub(crate) file_exists: Option<bool>,
     start_type: &'static str,
     delayed: bool,
     pub(crate) is_windows: bool,

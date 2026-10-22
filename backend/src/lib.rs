@@ -4,6 +4,7 @@ mod error;
 mod icons;
 mod leftovers;
 mod log;
+mod orphans;
 mod paths;
 mod quarantine;
 mod services;
@@ -55,6 +56,7 @@ pub fn run() {
             settings::save_settings,
             paths::storage_info,
             leftovers::scan_leftovers,
+            orphans::scan_orphans,
             uninstall::create_restore_point,
             uninstall::start_uninstall,
             uninstall::uninstall_finished,

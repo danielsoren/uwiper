@@ -244,10 +244,6 @@ impl Found {
         }
     }
 
-    pub(crate) fn guard(&self) -> &Guard {
-        &self.guard
-    }
-
     pub(crate) fn add(&mut self, kind: &'static str, target: Target, reason: &str, confidence: &'static str) {
         self.add_dated(kind, target, reason, confidence, None);
     }

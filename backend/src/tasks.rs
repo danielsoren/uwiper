@@ -17,7 +17,7 @@ pub struct TaskItem {
     command: Option<String>,
     arguments: Option<String>,
     pub(crate) binary: Option<String>,
-    file_exists: Option<bool>,
+    pub(crate) file_exists: Option<bool>,
     enabled: bool,
     triggers: String,
     pub(crate) is_windows: bool,
