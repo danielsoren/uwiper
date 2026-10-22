@@ -128,8 +128,9 @@ let drivers: DriverItem[] = [
 ];
 
 let settings: Settings = {
+  version: 1,
   storage: { oneFolder: true, quarantine: null, snapshots: null, logs: null, temp: null, logDays: 30 },
-  safety: { quarantine: true, keepDays: 30, restorePoint: true, protectSystem: true, preselect: 'high-medium' },
+  safety: { quarantine: true, keepDays: 30, restorePoint: true, protectSystem: true, preselect: 'high' },
   scan: {
     depth: 'standard',
     lookIn: { files: true, registry: true, services: true, tasks: true, drivers: true, firewall: true, shortcuts: true, path: true },

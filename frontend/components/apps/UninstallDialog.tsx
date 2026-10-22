@@ -57,7 +57,7 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
     setStep({ name: 'scanning' });
     try {
       const [leftovers, finished] = await Promise.all([api.scanLeftovers(app), api.uninstallFinished(app.id)]);
-      setSelected(preselect(leftovers, safety?.preselect ?? 'high-medium', canRemove));
+      setSelected(preselect(leftovers, safety?.preselect ?? 'high', canRemove));
       setStep({ name: 'review', leftovers, stillInstalled: !finished });
     } catch (e) {
       scanned.current = false;

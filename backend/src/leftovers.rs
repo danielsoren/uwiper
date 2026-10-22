@@ -328,9 +328,18 @@ impl Found {
             }
             _ => (None, None),
         });
-        for (item, (size, newest)) in self.items.iter_mut().zip(stats) {
+        let saves = parallel_map(&self.items, |item| match &item.target {
+            Target::Path { path } if item.kind == "folder" => holds_saved_games(Path::new(path)),
+            _ => false,
+        });
+        for ((item, (size, newest)), saves) in self.items.iter_mut().zip(stats).zip(saves) {
             item.size_bytes = size;
             item.modified = item.modified.or(newest);
+            // Saved games are never a sure thing to remove.
+            if saves {
+                item.confidence = "low";
+                item.reason.push_str(" – it holds saved games");
+            }
         }
         let rank = |c: &str| match c {
             "high" => 0,
@@ -405,17 +414,68 @@ fn data_roots(deep: bool) -> Vec<(PathBuf, &'static str)> {
         .collect()
 }
 
-pub(crate) fn shortcut_dirs() -> Vec<(PathBuf, usize)> {
+/// Where shortcuts live, how deep to look, and whether folders there can be
+/// an app's: Start menu folders are, but a folder on the Desktop is the
+/// user's own, whatever its name.
+pub(crate) fn shortcut_dirs() -> Vec<(PathBuf, usize, bool)> {
     [
-        (r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 2),
-        (r"%ProgramData%\Microsoft\Windows\Start Menu\Programs", 2),
-        (r"%USERPROFILE%\Desktop", 1),
-        (r"%PUBLIC%\Desktop", 1),
+        (r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 2, true),
+        (r"%ProgramData%\Microsoft\Windows\Start Menu\Programs", 2, true),
+        (r"%USERPROFILE%\Desktop", 1, false),
+        (r"%PUBLIC%\Desktop", 1, false),
     ]
     .into_iter()
-    .map(|(p, depth)| (PathBuf::from(expand_env(p)), depth))
-    .filter(|(p, _)| !p.to_string_lossy().contains('%'))
+    .map(|(p, depth, folders)| (PathBuf::from(expand_env(p)), depth, folders))
+    .filter(|(p, _, _)| !p.to_string_lossy().contains('%'))
     .collect()
+}
+
+/// A Start menu folder holding nothing but shortcuts (and desktop.ini).
+fn only_shortcuts(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .all(|e| {
+            e.is_ok_and(|e| {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                e.file_type().is_dir() || name.ends_with(".lnk") || name.ends_with(".url") || name == "desktop.ini"
+            })
+        })
+}
+
+/// Folder and file names games keep their saves under.
+const SAVE_DIRS: [&str; 8] = [
+    "savegames",
+    "savegame",
+    "saves",
+    "save",
+    "savedgames",
+    "saved games",
+    "savedata",
+    "savefiles",
+];
+const SAVE_FILES: [&str; 5] = ["sav", "save", "savegame", "sl2", "ess"];
+
+/// True when a folder holds saved games, a few levels down. Nothing rebuilds
+/// those, whoever made the folder.
+pub(crate) fn holds_saved_games(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .take(20_000)
+        .flatten()
+        .any(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if e.file_type().is_dir() {
+                SAVE_DIRS.contains(&name.as_str())
+            } else {
+                name.rsplit_once('.').is_some_and(|(_, ext)| SAVE_FILES.contains(&ext))
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +573,7 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     }
 
     if look.shortcuts {
-        for (dir, depth) in shortcut_dirs() {
+        for (dir, depth, folders) in shortcut_dirs() {
             for entry in walkdir::WalkDir::new(&dir)
                 .min_depth(1)
                 .max_depth(depth)
@@ -524,10 +584,19 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
                 let name = file_name(path);
                 let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s).to_string();
                 if entry.file_type().is_dir() {
-                    if let Some(level) = names.level(&name, "medium") {
-                        found.add_path(path, "Start menu folder for the app", level);
+                    if !folders {
+                        continue;
+                    }
+                    // Taken whole only when it holds nothing but shortcuts.
+                    let (suffix, cap) = if only_shortcuts(path) {
+                        ("", "medium")
+                    } else {
+                        (" – it holds more than shortcuts", "low")
+                    };
+                    if let Some(level) = names.level(&name, cap) {
+                        found.add_path(path, &format!("Start menu folder for the app{suffix}"), level);
                     } else if !publisher_shared && names.is_publisher(&name) {
-                        found.add_path(path, "Start menu folder of the app's publisher", "medium");
+                        found.add_path(path, &format!("Start menu folder of the app's publisher{suffix}"), cap);
                     }
                     continue;
                 }

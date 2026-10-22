@@ -29,7 +29,7 @@ export function Leftovers() {
 
   // A new scan starts from what Settings says to pick.
   useEffect(() => {
-    setSelected(preselect(orphans.data?.items ?? [], safety?.preselect ?? 'high-medium', (l) => elevated || !l.needsAdmin));
+    setSelected(preselect(orphans.data?.items ?? [], safety?.preselect ?? 'high', (l) => elevated || !l.needsAdmin));
   }, [orphans.data, safety?.preselect, elevated]);
 
   const picked = items.filter((l) => selected.has(l.id));

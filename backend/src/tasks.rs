@@ -128,7 +128,15 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
             .filter(|t| !t.is_empty())
     };
 
-    let exec = doc.descendants().find(|n| is(n, "Exec"));
+    // A task can have up to 32 actions; COM handlers and the like run no file UWiper can check.
+    let actions: Vec<roxmltree::Node> = doc
+        .descendants()
+        .find(|n| is(n, "Actions"))
+        .map(|a| a.children().filter(|c| c.is_element()).collect())
+        .unwrap_or_default();
+    let execs: Vec<roxmltree::Node> = actions.iter().copied().filter(|a| is(a, "Exec")).collect();
+    let other_actions = actions.len() > execs.len();
+    let exec = execs.first().copied();
     let author = child_text(doc.descendants().find(|n| is(n, "RegistrationInfo")), "Author").unwrap_or_default();
     let settings = doc.descendants().find(|n| is(n, "Settings"));
     let enabled = child_text(settings, "Enabled").is_none_or(|v| v != "false");
@@ -151,15 +159,33 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
         .map(|p| p.to_string_lossy().replace('/', "\\"))
         .unwrap_or_default();
     let binary = command.as_deref().and_then(resolve_executable);
+    // Missing only when every action runs a program that's gone.
+    let states: Vec<Option<bool>> = execs
+        .iter()
+        .map(|e| {
+            let command = child_text(Some(*e), "Command")?;
+            if uses_per_user_vars(&command) {
+                return None;
+            }
+            let program = resolve_executable(&command).or_else(|| {
+                // A bare name next to its working directory.
+                let dir = child_text(Some(*e), "WorkingDirectory")?;
+                let name = command.trim().trim_matches('"');
+                (!name.contains(['\\', '/'])).then(|| format!(r"{}\{name}", expand_env(dir.trim_end_matches('\\'))))
+            })?;
+            program_state(&program)
+        })
+        .collect();
+    let file_exists = if other_actions || states.is_empty() || states.iter().any(Option::is_none) {
+        None
+    } else {
+        Some(states.contains(&Some(true)))
+    };
     Some(TaskItem {
         // Windows' own tasks also sit outside the Microsoft folder; their author says whose they are.
         is_windows: name.starts_with("Microsoft\\") || is_windows_author(&author),
         // A task may run as another user, whose profile a per-user path points into.
-        file_exists: if command.as_deref().is_some_and(uses_per_user_vars) {
-            None
-        } else {
-            binary.as_deref().and_then(program_state)
-        },
+        file_exists,
         binary,
         command,
         arguments,
@@ -219,5 +245,23 @@ mod tests {
         assert!(task.is_windows);
         assert!(is_windows_author("Microsoft Corporation"));
         assert!(!is_windows_author("Google LLC"));
+    }
+
+    #[test]
+    fn a_task_is_broken_only_when_every_action_is() {
+        // A second action whose program is there (this test binary).
+        let here = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let two = TASK.replace(
+            "</Exec></Actions>",
+            &format!("</Exec><Exec><Command>{here}</Command></Exec></Actions>"),
+        );
+        let task = parse(two.as_bytes(), Path::new("Vendor/Two")).unwrap();
+        assert_ne!(task.file_exists, Some(false));
+        let com = TASK.replace(
+            "</Exec></Actions>",
+            "</Exec><ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler></Actions>",
+        );
+        let task = parse(com.as_bytes(), Path::new("Vendor/Com")).unwrap();
+        assert_eq!(task.file_exists, None);
     }
 }

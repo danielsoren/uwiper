@@ -29,7 +29,7 @@ function CleanUpDialog({ trace, onClose }: { trace: TraceView; onClose: () => vo
     api.traceLeftovers(trace.id).then(
       (found) => {
         setItems(found);
-        setSelected(preselect(found, safety?.preselect ?? 'high-medium', (l) => elevated || !l.needsAdmin));
+        setSelected(preselect(found, safety?.preselect ?? 'high', (l) => elevated || !l.needsAdmin));
       },
       (e) => {
         notify(errorText(e));

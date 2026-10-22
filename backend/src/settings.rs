@@ -9,6 +9,8 @@ use crate::{paths, AppState};
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
+    /// Which defaults the file was written with, so older ones can be updated.
+    pub version: u32,
     pub storage: Storage,
     pub safety: Safety,
     pub scan: Scan,
@@ -59,7 +61,8 @@ impl Default for Safety {
             keep_days: 30,
             restore_point: true,
             protect_system: true,
-            preselect: "high-medium".into(),
+            // Medium finds are matched by name: worth a look, not a tick.
+            preselect: "high".into(),
         }
     }
 }
@@ -130,13 +133,39 @@ impl Default for Appearance {
     }
 }
 
+/// The current settings version.
+const VERSION: u32 = 1;
+
+/// Brings settings written by an older UWiper up to date.
+fn migrate(mut s: Settings) -> (Settings, bool) {
+    if s.version >= VERSION {
+        return (s, false);
+    }
+    // 1.0: only High finds are picked to start with. "High and Medium" was
+    // the old default, so it's taken as not chosen on purpose.
+    if s.safety.preselect == "high-medium" {
+        s.safety.preselect = "high".into();
+    }
+    s.version = VERSION;
+    (s, true)
+}
+
 /// Reads settings.toml, writing the defaults on first launch so the file is
 /// there to inspect from the start.
 pub fn load() -> Settings {
     match std::fs::read_to_string(paths::settings_file()) {
-        Ok(text) => toml::from_str(&text).unwrap_or_default(),
+        Ok(text) => {
+            let (settings, changed) = migrate(toml::from_str(&text).unwrap_or_default());
+            if changed {
+                let _ = persist(&settings);
+            }
+            settings
+        }
         Err(_) => {
-            let defaults = Settings::default();
+            let defaults = Settings {
+                version: VERSION,
+                ..Settings::default()
+            };
             let _ = persist(&defaults);
             defaults
         }
@@ -179,6 +208,19 @@ mod tests {
         assert_eq!(s.appearance.window_buttons, "windows");
         assert!(s.storage.one_folder);
         assert_eq!(s.safety.keep_days, 30);
+    }
+
+    #[test]
+    fn older_settings_pick_only_high_finds() {
+        let old: Settings = toml::from_str("[safety]\npreselect = \"high-medium\"\n").unwrap();
+        let (new, changed) = migrate(old);
+        assert!(changed && new.safety.preselect == "high" && new.version == VERSION);
+        let chosen: Settings = toml::from_str("version = 1\n[safety]\npreselect = \"high-medium\"\n").unwrap();
+        assert_eq!(
+            migrate(chosen).0.safety.preselect,
+            "high-medium",
+            "a choice made since is kept"
+        );
     }
 
     #[test]

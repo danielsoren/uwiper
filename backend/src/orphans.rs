@@ -69,7 +69,8 @@ const ROOT_NAMES: [&str; 8] = [
 ];
 
 impl Owners {
-    fn new(apps: &[InstalledApp], programs: &[String]) -> Self {
+    /// `names`: other things known to be there – services, Store apps.
+    fn new(apps: &[InstalledApp], programs: &[String], names: &[String]) -> Self {
         let mut tokens = Vec::new();
         let mut folders = Vec::new();
         let shared = apps::shared_folders();
@@ -78,6 +79,9 @@ impl Owners {
                 tokens.push(t);
             }
         };
+        for name in names {
+            add(squash(&clean_name(name)));
+        }
         for app in apps {
             let clean = clean_name(&app.name);
             add(squash(&clean));
@@ -243,6 +247,14 @@ const NOT_APP_KEYS: &[&str] = &[
     "setup",
     "dotnet",
     "openssh",
+    // Shared registration lists other apps and drivers add themselves to.
+    "asio",
+    "javasoft",
+    "vst",
+    "vst3",
+    "steinberg",
+    "ivi foundation",
+    "audiokinetic",
 ];
 
 fn is_system_name(name: &str) -> bool {
@@ -358,7 +370,16 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             .filter(|t| t.file_exists == Some(true))
             .filter_map(|t| t.binary.clone()),
     );
-    let owners = Owners::new(&apps, &programs);
+    // Programs running right now, portable ones too, claim their folders.
+    programs.extend(imp::running_programs());
+    // Services (Windows' own too: a driver's settings may be named after its
+    // service) and Microsoft Store apps, which aren't in the apps list.
+    let mut names: Vec<String> = services
+        .iter()
+        .flat_map(|s| [s.name.clone(), s.display_name.clone()])
+        .collect();
+    names.extend(store_app_names());
+    let owners = Owners::new(&apps, &programs, &names);
     let mut found = Found::new(Guard::new(settings), owners.folders.clone(), false);
 
     // Apps listed as installed whose uninstaller is gone. Certain only when
@@ -411,7 +432,7 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
     }
 
     // Shortcuts to things that are gone, and Start menu folders left empty.
-    for (dir, depth) in shortcut_dirs() {
+    for (dir, depth, folders) in shortcut_dirs() {
         let walker = walkdir::WalkDir::new(&dir)
             .min_depth(1)
             .max_depth(depth + 1)
@@ -420,10 +441,9 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             let path = entry.path();
             if entry.file_type().is_dir() {
                 // The Desktop's folders are the user's own; Startup is Windows'.
-                let in_start_menu = dir.to_string_lossy().to_lowercase().ends_with(r"start menu\programs");
                 let name = file_name(path);
                 let empty = std::fs::read_dir(path).is_ok_and(|mut it| it.next().is_none());
-                if in_start_menu && empty && !is_system_name(&name) && !name.eq_ignore_ascii_case("startup") {
+                if folders && empty && !is_system_name(&name) && !name.eq_ignore_ascii_case("startup") {
                     found.add_path(path, "Empty Start menu folder", "medium");
                 }
                 continue;
@@ -499,7 +519,10 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
                     "No installed app is registered for this folder – it may be a portable app",
                     "low",
                 ),
-                (false, false) => ("No installed app matches this folder", "low"),
+                (false, false) => (
+                    "UWiper couldn't match it to an installed app – it may still be in use, check it yourself",
+                    "low",
+                ),
             };
             found.add_path(&dir, reason, confidence);
         }
@@ -515,7 +538,10 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
             let (reason, confidence) = if empty {
                 ("Empty settings key that no installed app uses", "medium")
             } else {
-                ("Settings of an app that isn't installed", "low")
+                (
+                    "UWiper couldn't match these settings to an installed app – they may still be in use",
+                    "low",
+                )
             };
             let key = format!(r"{software}\{name}");
             found.add_dated("registry", Target::RegistryKey { key }, reason, confidence, modified);
@@ -526,6 +552,23 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
         items: found.finish(),
         needs_admin,
     })
+}
+
+/// Names of installed Microsoft Store apps, from their package folders:
+/// "AnthropicPBC.Claude_pzs8…" gives "AnthropicPBC" and "Claude".
+fn store_app_names() -> Vec<String> {
+    let packages = std::path::PathBuf::from(expand_env(r"%LOCALAPPDATA%\Packages"));
+    let mut out = Vec::new();
+    for dir in subdirs(&packages) {
+        let family = file_name(&dir);
+        let base = family.split('_').next().unwrap_or_default();
+        for word in base.split('.') {
+            if word.len() >= 3 && !word.chars().all(|c| c.is_ascii_hexdigit()) && !is_system_name(word) {
+                out.push(word.to_string());
+            }
+        }
+    }
+    out
 }
 
 enum Presence {
@@ -578,6 +621,10 @@ mod imp {
     pub fn is_link_or_system(path: &Path) -> bool {
         std::fs::symlink_metadata(path).map_or(true, |m| m.file_type().is_symlink())
     }
+
+    pub fn running_programs() -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[cfg(windows)]
@@ -587,6 +634,46 @@ mod imp {
     use std::os::windows::fs::MetadataExt;
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
     use winreg::RegKey;
+
+    /// Full paths of the programs running now (those UWiper may look at).
+    pub fn running_programs() -> Vec<String> {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let mut out = Vec::new();
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return out;
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+            while more {
+                let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.th32ProcessID);
+                if !process.is_null() {
+                    let mut buf = [0u16; 1024];
+                    let mut len = buf.len() as u32;
+                    if QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len) != 0 {
+                        let path = String::from_utf16_lossy(&buf[..len as usize]);
+                        if !out.contains(&path) {
+                            out.push(path);
+                        }
+                    }
+                    CloseHandle(process);
+                }
+                more = Process32NextW(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+        }
+        // Windows' own programs say nothing about apps.
+        out.retain(|p| !crate::util::is_windows_component(p));
+        out
+    }
 
     fn open(key: &str) -> Option<RegKey> {
         let (hive, sub) = split_key(key)?;
@@ -746,9 +833,18 @@ mod tests {
         let o = Owners::new(
             &[],
             &[r"C:\Program Files\Focusrite\Drivers\Focusrite Notifier.exe".to_string()],
+            &[],
         );
         assert!(o.claims("Focusrite"));
         assert!(!o.claims("Program Files"));
+    }
+
+    #[test]
+    fn services_and_store_apps_claim_their_names() {
+        let o = Owners::new(&[], &[], &["NahimicService".to_string(), "Claude".to_string()]);
+        assert!(o.claims("Nahimic"));
+        assert!(o.claims("Claude-Data"));
+        assert!(!o.claims("Ravenswatch"));
     }
 
     #[test]

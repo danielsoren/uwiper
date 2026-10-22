@@ -47,7 +47,7 @@ export function Settings() {
     );
   }
 
-  const set = <K extends keyof SettingsT>(section: K, patch: Partial<SettingsT[K]>) =>
+  const set = <K extends Exclude<keyof SettingsT, 'version'>>(section: K, patch: Partial<SettingsT[K]>) =>
     updateSettings((s) => ({ ...s, [section]: { ...s[section], ...patch } }));
 
   const info = storage.data;

@@ -277,6 +277,8 @@ export interface Environment {
 }
 
 export interface Settings {
+  /** Which defaults the file was written with. */
+  version: number;
   storage: {
     oneFolder: boolean;
     quarantine: string | null;
