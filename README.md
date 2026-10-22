@@ -8,6 +8,7 @@
   <img src="https://img.shields.io/badge/portable-no%20installer-30D158?style=flat-square" alt="Portable, no installer">
   <a href="https://github.com/danielsoren/uwiper/actions/workflows/build.yml"><img src="https://img.shields.io/github/actions/workflow/status/danielsoren/uwiper/build.yml?style=flat-square&label=build" alt="Build status"></a>
   <img src="https://img.shields.io/badge/built%20with-Tauri%20%2B%20Rust-BF5AF2?style=flat-square" alt="Built with Tauri and Rust">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-8E8E95?style=flat-square" alt="MIT license"></a>
 </p>
 
 <h3 align="center">Uninstalling an app shouldn't leave half of it behind. 🧹</h3>
@@ -36,8 +37,8 @@
 | 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like. |
 | 🔎 **Leftovers, explained** | Every find says why it's there and how sure UWiper is: **High** – certainly the app's, **Medium** – named after it, **Low** – may be shared. You tick what goes. |
 | ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML. Restore a whole batch in one click. Batches are deleted for good after 30 days (you choose). |
-| 🧹 **Cache cleanup** | Temp files, Windows Update downloads, crash dumps, shader and thumbnail caches, browser caches, npm / pip / Cargo / NuGet / Gradle caches. Cookies, passwords and history are never touched. |
-| 👻 **Entries pointing nowhere** | Startup entries, services and scheduled tasks whose programs are long gone – remove them in one go. |
+| 👻 **Leftovers of apps long gone** | Folders and settings no installed app claims, apps still listed as installed whose files are gone, shortcuts and PATH entries pointing nowhere, startup entries, services and tasks whose programs are missing. Each with how sure UWiper is and when it last changed. |
+| 🧹 **Junk and caches** | Temp files, Windows Update downloads, crash dumps, logs, the Recycle Bin, caches of every Chromium and Firefox browser, Telegram, Discord, Steam and other apps – plus any app cache found by folder name, Store apps included. Cookies, passwords and history are never touched. |
 | 🛡️ **Hard to break things with** | Windows and Microsoft components, shared folders, other apps' folders and your own "Never touch" list are always off limits. |
 | 🎒 **Leaves no traces itself** | Fully portable: settings, quarantine, logs and even the WebView profile live next to the exe. Delete the folder and UWiper is gone. |
 
@@ -54,11 +55,11 @@
   </tr>
   <tr>
     <td width="50%"><img src="assets/screenshots/quarantine.webp" alt="Quarantine with batches ready to restore"></td>
-    <td width="50%"><img src="assets/screenshots/settings.webp" alt="Settings: where UWiper keeps its data"></td>
+    <td width="50%"><img src="assets/screenshots/leftovers.webp" alt="Leftovers of apps that are gone"></td>
   </tr>
   <tr>
     <td align="center"><sub><b>Quarantine</b> – put anything back in one click</sub></td>
-    <td align="center"><sub><b>Settings</b> – you decide where everything lives</sub></td>
+    <td align="center"><sub><b>Leftovers</b> of apps that are long gone, with how sure UWiper is</sub></td>
   </tr>
 </table>
 
@@ -72,14 +73,15 @@
 > The exe isn't code-signed yet, so SmartScreen may say "Windows protected your PC" – click **More info → Run anyway**. UWiper needs WebView2, which Windows 10 and 11 already have.
 
 > [!IMPORTANT]
-> v0.2 is the first version that removes things, and it's a beta. Quarantine is on by default – keep it on while you try UWiper out.
+> UWiper removes things, and it's still a beta. Quarantine is on by default – keep it on while you try UWiper out.
 
 ## 🗺️ Roadmap
 
-- [x] **v0.1** – see installed apps, caches, startup entries, services and scheduled tasks
-- [x] **v0.2** – uninstall with a leftover scan, quarantine and restore, cache cleaning ← *you are here*
-- [ ] **v0.3** – leftovers of apps removed long ago, Store / MSIX apps, Driver Store packages, firewall rules, PATH entries
-- [ ] **v0.4** – install tracking: snapshot what an installer creates, for a perfect uninstall later
+- [x] **v0.1** – the foundation: design, administrator mode, installed apps
+- [x] **v0.2** – uninstall with a leftover scan, quarantine and restore
+- [x] **v0.3** – entries without an owner, junk and caches ← *you are here*
+- [ ] **v0.4** – startup, services, scheduled tasks and drivers: switch them on and off, remove old driver packages
+- [ ] **v0.5** – install tracking: snapshot what an installer creates, for a perfect uninstall later
 
 Ideas and bug reports are welcome in [Issues](https://github.com/danielsoren/uwiper/issues) 💬
 
@@ -103,9 +105,10 @@ backend/             Rust + Tauri
   src/icons.rs       app icons from exe files, as PNG
   src/uninstall.rs   runs uninstallers, restore points
   src/leftovers.rs   finds what an app left behind
+  src/orphans.rs     finds what apps that are gone left behind
   src/targets.rs     removable things, safety rules, backup and restore
   src/quarantine.rs  quarantine batches
-  src/cleanup.rs     cache and temp file locations, cleaning
+  src/cleanup.rs     caches: known ones, found by name or layout; cleaning
   src/startup.rs     Run keys, Startup folders, StartupApproved state
   src/services.rs    services and their binaries
   src/tasks.rs       scheduled task XML under System32\Tasks
@@ -152,4 +155,4 @@ CI builds on Windows and publishes a GitHub release with `UWiper.exe` and a port
 
 </details>
 
-<p align="center"><sub>Made with ☕ and 🦀 · <a href="https://github.com/danielsoren/uwiper/issues">Report a bug</a></sub></p>
+<p align="center"><sub>Made with ☕ and 🦀 · <a href="LICENSE">MIT license</a> · <a href="https://github.com/danielsoren/uwiper/issues">Report a bug</a></sub></p>

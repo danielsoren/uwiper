@@ -132,7 +132,7 @@ export function System() {
 
       <PageBody>
         {tab === 'drivers' || !resource ? (
-          <Empty icon="cpu" title="Driver packages arrive in v0.3">
+          <Empty icon="cpu" title="Driver packages arrive in v0.4">
             UWiper will list the third-party driver packages in the Driver Store and show which ones no device uses anymore – old
             GPU drivers alone can take gigabytes.
           </Empty>

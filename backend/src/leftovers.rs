@@ -590,6 +590,18 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
         }
     }
 
+    if look.path {
+        for (scope, entry) in crate::orphans::path_entries() {
+            if inside_install(&expand_env(&entry)) {
+                let target = Target::PathEntry {
+                    scope: scope.into(),
+                    entry,
+                };
+                found.add("environment", target, "In PATH, pointing into the app's folder", "high");
+            }
+        }
+    }
+
     if look.services {
         for service in crate::services::list().unwrap_or_default() {
             let program = service.binary.as_deref().unwrap_or_default();

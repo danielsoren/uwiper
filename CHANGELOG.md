@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.3.0-beta.1] – 2026-10-22
+
+Leftovers of apps that are long gone, and a lot more junk and caches. Still a beta – quarantine stays on by default.
+
+### Download
+
+- **UWiper.exe** – the app itself. Put it in any folder and run it.
+- **UWiper-v0.3.0-beta.1-portable.zip** – the same, in a folder.
+
+### New
+
+- 👻 **Entries without an owner.** The Leftovers page now scans for everything apps that are gone left behind:
+  - folders in AppData, ProgramData and Program Files, and settings in the registry, that no installed app claims;
+  - apps still listed as installed whose uninstaller and folder are gone;
+  - shortcuts and Start menu folders pointing nowhere;
+  - PATH and App Paths entries pointing nowhere;
+  - startup entries, services and tasks whose programs are missing.
+
+  Missing files are certain (High), empty folders and keys likely (Medium), and unclaimed folders and keys only possible (Low – never picked for you). Every find shows when it last changed.
+- 🧹 **More junk and caches.**
+  - Any Chromium or Firefox-based browser is found by its folder layout, not just a list of names.
+  - App caches are found by folder name, Microsoft Store apps included.
+  - Known caches for Telegram, Steam, Teams, Epic Games, Battle.net, Adobe media, Opera, Yandex Browser, Vivaldi, Go, Bun, Maven, Electron, JetBrains IDEs and Unreal Engine.
+  - Also the Recycle Bin (off by default), Windows logs and the Windows internet cache.
+- 📜 **MIT license.**
+
+### Better
+
+- Lists refresh as soon as anything is removed or restored, and data folders get an Open button.
+- Settings is simpler: the "Outside the UWiper folder" section and the Start with Windows option are gone. UWiper keeps nothing outside its folder, and an old startup entry is removed.
+- Cleanup and Quarantine rows expand with an animation.
+- Notes line up with warnings; System's path column lines up across rows.
+- App icons: MSI product icons, and the app's exe one folder down (Adobe Acrobat and others that showed a letter).
+
 ## [0.2.0-beta.1] – 2026-10-21
 
 The first version that removes things. **It's a beta** – quarantine is on by default, so everything UWiper removes can be put back. Please keep it on while you try this version.

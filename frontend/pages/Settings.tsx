@@ -175,7 +175,7 @@ export function Settings() {
               />
             }
           />
-          <SettingsRow label="Look in" sub="Places UWiper checks after an app is removed. Drivers, firewall rules and PATH arrive in v0.3">
+          <SettingsRow label="Look in" sub="Places UWiper checks after an app is removed. Drivers and firewall rules arrive in v0.4">
             <div className="flex flex-wrap gap-1.5">
               {LOOK_IN.map(([key, label]) => (
                 <Chip key={key} on={scan.lookIn[key]} onToggle={() => set('scan', { lookIn: { ...scan.lookIn, [key]: !scan.lookIn[key] } })}>

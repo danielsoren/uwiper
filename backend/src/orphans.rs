@@ -33,6 +33,11 @@ pub struct OrphanScan {
     needs_admin: bool,
 }
 
+/// Every entry of the user's and the system PATH, as written.
+pub fn path_entries() -> Vec<(&'static str, String)> {
+    imp::path_entries()
+}
+
 #[tauri::command]
 pub async fn scan_orphans(state: State<'_, AppState>) -> Result<OrphanScan> {
     let settings = state.settings.lock().unwrap().clone();
@@ -417,7 +422,7 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
     }
 
     // PATH entries and App Paths that point nowhere.
-    for (scope, entry) in imp::path_entries() {
+    for (scope, entry) in path_entries() {
         if is_gone(&entry) == Some(true) {
             let reason = if scope == "machine" {
                 "In the system PATH, but the folder no longer exists"
