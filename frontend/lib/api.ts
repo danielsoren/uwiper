@@ -19,6 +19,10 @@ import type {
   StartupItem,
   StorageInfo,
   TaskItem,
+  Trace,
+  TraceDraft,
+  TraceView,
+  TrackingStatus,
 } from './types';
 
 /** False when the UI runs in a plain browser (`npm run dev`) for design work. */
@@ -58,7 +62,26 @@ export const api = {
   restoreBatch: (id: string) => call<RestoreReport>('restore_batch', { id }),
   deleteBatch: (id: string) => call<void>('delete_batch', { id }),
   cleanCaches: (ids: string[]) => call<CleanReport>('clean_caches', { ids }),
+
+  trackingStatus: () => call<TrackingStatus>('tracking_status'),
+  startTracking: () => call<TrackingStatus>('start_tracking'),
+  launchInstaller: (path: string) => call<void>('launch_installer', { path }),
+  finishTracking: () => call<TraceDraft>('finish_tracking'),
+  chooseTraceApp: (appId: string | null) => call<TraceDraft>('choose_trace_app', { appId }),
+  saveTrace: (keep: string[]) => call<Trace>('save_trace', { keep }),
+  cancelTracking: () => call<void>('cancel_tracking'),
+  listTraces: () => call<TraceView[]>('list_traces'),
+  deleteTrace: (id: string) => call<void>('delete_trace', { id }),
+  traceLeftovers: (id: string) => call<Leftover[]>('trace_leftovers', { id }),
 };
+
+/** Asks for an installer to track. The browser preview pretends one was picked. */
+export async function pickInstaller(): Promise<string | null> {
+  if (!inTauri) return 'C:\\Users\\you\\Downloads\\Obsidian-1.7.7.exe';
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const picked = await open({ multiple: false, title: 'Choose an installer', filters: [{ name: 'Installers', extensions: ['exe', 'msi'] }] });
+  return typeof picked === 'string' ? picked : null;
+}
 
 export async function pickFolder(title: string): Promise<string | null> {
   if (!inTauri) return null;

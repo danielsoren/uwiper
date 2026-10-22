@@ -7,6 +7,7 @@ import { Apps } from '../pages/Apps';
 import { Cleanup } from '../pages/Cleanup';
 import { Leftovers } from '../pages/Leftovers';
 import { Overview } from '../pages/Overview';
+import { Installs } from '../pages/Installs';
 import { Quarantine } from '../pages/Quarantine';
 import { Settings } from '../pages/Settings';
 import { System } from '../pages/System';
@@ -19,6 +20,7 @@ const PAGES: Record<Page, ComponentType> = {
   leftovers: Leftovers,
   cleanup: Cleanup,
   system: System,
+  installs: Installs,
   quarantine: Quarantine,
   settings: Settings,
 };

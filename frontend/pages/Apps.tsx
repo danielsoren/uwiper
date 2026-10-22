@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AppDetail } from '../components/apps/AppDetail';
 import { AppRow } from '../components/apps/AppRow';
 import { AppsSkeleton } from '../components/apps/AppsSkeleton';
 import { PageBody, PageHeader, Toolbar } from '../components/layout/Page';
 import { formatBytes, plural } from '../lib/format';
-import { useResource } from '../store/hooks';
+import { useFocus, useResource } from '../store/hooks';
+import { useAppStore } from '../store/useAppStore';
 import { Button, Callout, Empty, Field, SegmentCount, Segmented } from '../ui';
 
 type Source = 'all' | 'win32' | 'msi';
@@ -19,6 +20,14 @@ export function Apps() {
   const [source, setSource] = useState<Source>('all');
   const [sort, setSort] = useState<Sort>('name');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const traces = useAppStore((s) => s.res.traces.data);
+  const tracked = useMemo(() => new Set((traces ?? []).map((t) => t.appId).filter(Boolean)), [traces]);
+
+  // Installs' "Uninstall…" opens the app it was tracked for.
+  const focus = useFocus(!!apps.data);
+  useEffect(() => {
+    if (focus) setSelectedId(focus);
+  }, [focus]);
 
   const all = useMemo(() => apps.data ?? [], [apps.data]);
   const rows = useMemo(() => {
@@ -73,7 +82,7 @@ export function Apps() {
         <div className="flex min-h-0 flex-1 border-t border-line">
           <div role="listbox" aria-label="Installed apps" className="scroll-thin min-w-0 flex-[3_1_380px] overflow-auto border-r border-line pb-3 pl-4 pr-2.5 pt-2">
             {rows.map((a) => (
-              <AppRow key={a.id} app={a} selected={selected?.id === a.id} onSelect={() => setSelectedId(a.id)} />
+              <AppRow key={a.id} app={a} tracked={tracked.has(a.id)} selected={selected?.id === a.id} onSelect={() => setSelectedId(a.id)} />
             ))}
             {rows.length === 0 && <div className="py-12 text-center text-fg-3">No apps match</div>}
           </div>

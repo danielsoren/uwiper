@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.5.0-beta.1] – 2026-10-22
+
+Install tracking: UWiper notes what an installer adds, so uninstalling the app later removes all of it.
+
+### Download
+
+- **UWiper.exe** – the app itself. Put it in any folder and run it.
+- **UWiper-v0.5.0-beta.1-portable.zip** – the same, in a folder.
+
+### New
+
+- 📦 **Track an install.** On the new Installs page:
+  1. UWiper takes a snapshot.
+  2. You run the installer – pick it in UWiper or start it yourself.
+  3. You click Done, and UWiper shows what's new: folders, files, shortcuts, registry keys, its entry in installed apps, services, scheduled tasks, startup entries, PATH entries and driver packages.
+  4. You untick anything that isn't the app's and save the trace.
+
+  Tracking survives closing UWiper or restarting Windows. It also looks at new folders at the root of the system drive (`C:\xampp`), new dot-folders in your profile and new environment variables – those are never ticked for you.
+- 🎯 **Accurate by design.**
+  - UWiper records what an installer adds at the top two levels of each place, never anything deeper inside a folder that was already there – other apps running at the same time write there too.
+  - Something only counts as new when it was also made after tracking started.
+  - What appeared inside an existing folder, loose new files, drivers, and services or tasks that don't run anything the installer added are left unticked.
+  - Runtimes installed along with the app (Visual C++ and the like) are kept out of its trace, since other apps may need them. You can pick which app the install was for.
+  - A trace remembers what was in each folder it made. If other apps add to that folder later, only the app's own part is offered for removal.
+  - An app that updated itself under a new name or id is still recognized as the same app.
+- 🔒 **Private.**
+  - The snapshot on disk holds only salted hashes of names.
+  - Traces hold names of files, folders, registry keys and services – never what's in them.
+  - Both stay in UWiper's folder.
+- 🧹 **Uninstalling a tracked app** starts its leftover scan from the trace, and **Remove what's left** cleans up after an app that's already gone. Both go through quarantine as always.
+- Apps marks tracked apps and shows when the install was tracked.
+
 ## [0.4.0-beta.1] – 2026-10-22
 
 Startup entries, services and scheduled tasks can now be switched, and old driver packages removed.

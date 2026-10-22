@@ -464,7 +464,17 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
             .is_some_and(|dir| is_within(&canonical(path), dir))
     };
 
-    let mut found = Found::new(guard, other_folders, imp::key_exists(&app.id));
+    let mut found = Found::new(guard, other_folders.clone(), imp::key_exists(&app.id));
+    // What its installer added, when the install was tracked: these come first.
+    let like = crate::tracking::AppLike {
+        id: &app.id,
+        name: &app.name,
+        publisher: app.publisher.as_deref(),
+        location: install.as_deref(),
+    };
+    for trace in crate::tracking::traces_for(settings, &like) {
+        crate::tracking::add_to(&mut found, &trace, &other_folders);
+    }
     let look = &settings.scan.look_in;
     let quick = settings.scan.depth == "quick";
     let deep = settings.scan.depth == "deep";

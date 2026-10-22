@@ -35,7 +35,7 @@ export type Confidence = 'high' | 'medium' | 'low';
 
 export interface Leftover {
   id: string;
-  kind: 'app' | 'folder' | 'file' | 'shortcut' | 'registry' | 'service' | 'task' | 'startup' | 'environment';
+  kind: 'app' | 'folder' | 'file' | 'shortcut' | 'registry' | 'service' | 'task' | 'startup' | 'environment' | 'driver';
   label: string;
   reason: string;
   confidence: Confidence;
@@ -180,6 +180,69 @@ export interface DriverItem {
   /** An older version nothing uses while a device uses the newest: picked to start with. */
   suggested: boolean;
   removal: Target;
+}
+
+export interface TrackingStatus {
+  active: boolean;
+  startedAt: number | null;
+  /** Tracking was started with administrator rights. */
+  elevated: boolean;
+  /** The installer's file name. */
+  installer: string | null;
+  /** UWiper started the installer and can tell whether it's running. */
+  installerFollowed: boolean;
+  installerRunning: boolean;
+}
+
+/** Something an installer added. */
+export interface TraceItem {
+  id: string;
+  kind: Leftover['kind'];
+  label: string;
+  target: Target;
+  /** Made at the top of its place, rather than inside something that was already there. */
+  sure: boolean;
+}
+
+export interface Trace {
+  id: string;
+  name: string;
+  /** The installed app it belongs to, as in the app list. */
+  appId: string | null;
+  publisher: string | null;
+  version: string | null;
+  installer: string | null;
+  startedAt: number;
+  finishedAt: number;
+  /** Other apps that were installed along with it. */
+  alsoInstalled: string[];
+  items: TraceItem[];
+}
+
+export interface TraceView extends Trace {
+  /** Its app is still installed. */
+  installed: boolean;
+  /** For each item: still there. */
+  present: boolean[];
+}
+
+/** What tracking found, before it's saved. */
+export interface TraceDraft {
+  startedAt: number;
+  name: string;
+  appId: string | null;
+  publisher: string | null;
+  version: string | null;
+  /** The app was already installed: this was an update. */
+  updated: boolean;
+  alsoInstalled: string[];
+  /** Apps installed or changed meanwhile, to pick from. */
+  candidates: { id: string; name: string }[];
+  /** False when scheduled tasks couldn't be read. */
+  tasksChecked: boolean;
+  /** Tracking ran so long that nothing is ticked. */
+  longWindow: boolean;
+  items: (TraceItem & { sizeBytes: number | null })[];
 }
 
 export type DataDirKey = 'quarantine' | 'snapshots' | 'logs' | 'temp';

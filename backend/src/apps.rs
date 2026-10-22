@@ -17,7 +17,7 @@ pub struct InstalledApp {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) publisher: Option<String>,
-    version: Option<String>,
+    pub(crate) version: Option<String>,
     pub(crate) install_location: Option<String>,
     /// ISO date, e.g. "2026-03-12"
     install_date: Option<String>,

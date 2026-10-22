@@ -1,7 +1,7 @@
 import { useState, type ReactNode } from 'react';
 import { api, errorText } from '../../lib/api';
 import { cn } from '../../lib/cn';
-import { formatBytes, formatDate } from '../../lib/format';
+import { formatBytes, formatDate, plural } from '../../lib/format';
 import type { InstalledApp } from '../../lib/types';
 import { useAppStore } from '../../store/useAppStore';
 import { Button } from '../../ui';
@@ -31,6 +31,7 @@ export function AppDetail({ app }: { app: InstalledApp }) {
   const notify = useAppStore((s) => s.notify);
   const [copied, setCopied] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
+  const trace = useAppStore((s) => s.res.traces.data?.find((t) => t.appId === app.id));
   const command = app.quietUninstallString ?? app.uninstallString;
 
   const copy = () => {
@@ -67,6 +68,11 @@ export function AppDetail({ app }: { app: InstalledApp }) {
           {app.scope === 'user' ? 'Current user' : 'All users'}
           {app.arch && ` · ${app.arch}`}
         </Fact>
+        {trace && (
+          <Fact label="Install tracked" hint="Uninstalling removes everything it added" wide>
+            {formatDate(new Date(trace.finishedAt * 1000).toISOString().slice(0, 10))} · {plural(trace.items.length, 'item', 'items')}
+          </Fact>
+        )}
         <Fact label="Location" wide mono>
           {app.installLocation ?? 'Not reported by the installer'}
         </Fact>
