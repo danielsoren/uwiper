@@ -40,8 +40,8 @@ pub enum Backup {
     Value { vtype: u32, data: Vec<u8> },
     /// The task's XML definition.
     TaskXml { file: String },
-    /// Nothing to keep: the target itself says what to put back.
-    Entry,
+    /// Where a PATH entry was, so it goes back to the same place.
+    PathEntry { positions: Vec<usize> },
 }
 
 /// What the safety rules need to know.
@@ -148,7 +148,11 @@ impl Guard {
                 if !matches!(scope.as_str(), "user" | "machine") || entry.trim().is_empty() || entry.contains(';') {
                     return Err("Not a PATH entry".into());
                 }
-                Ok(())
+                let folder = expand_env(entry.trim().trim_matches('"'));
+                if is_within(&folder, &windows_dir()) {
+                    return Err("Part of Windows".into());
+                }
+                self.check_excluded(&folder)
             }
         }
     }
@@ -340,28 +344,62 @@ pub fn describe(target: &Target) -> String {
     }
 }
 
-/// The PATH text without `entry`, or `None` when it isn't there.
-pub fn without_entry(path: &str, entry: &str) -> Option<String> {
-    let parts: Vec<&str> = path.split(';').collect();
-    let kept: Vec<&str> = parts.iter().copied().filter(|p| !same_entry(p, entry)).collect();
-    (kept.len() < parts.len()).then(|| kept.join(";"))
+/// Splits PATH text into its entries. A quoted entry may hold a ";".
+pub fn split_path(text: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    for ch in text.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                parts.last_mut().unwrap().push(ch);
+            }
+            ';' if !quoted => parts.push(String::new()),
+            _ => parts.last_mut().unwrap().push(ch),
+        }
+    }
+    parts
 }
 
-/// The PATH text with `entry` added at the end, or `None` when it's there already.
-pub fn with_entry(path: &str, entry: &str) -> Option<String> {
-    if path.split(';').any(|p| same_entry(p, entry)) {
+/// The PATH text without `entry`, with the positions it had. `None` when
+/// it isn't there.
+pub fn without_entry(path: &str, entry: &str) -> Option<(String, Vec<usize>)> {
+    let parts = split_path(path);
+    let positions: Vec<usize> = (0..parts.len()).filter(|&i| same_entry(&parts[i], entry)).collect();
+    if positions.is_empty() {
         return None;
     }
-    let base = path.trim_end_matches(';');
-    Some(if base.is_empty() {
-        entry.to_string()
-    } else {
-        format!("{base};{entry}")
-    })
+    let kept: Vec<&str> = parts
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !positions.contains(i))
+        .map(|(_, p)| p.as_str())
+        .collect();
+    Some((kept.join(";"), positions))
+}
+
+/// The PATH text with `entry` back at its old positions (or at the end).
+/// `None` when it's there already.
+pub fn with_entry(path: &str, entry: &str, positions: &[usize]) -> Option<String> {
+    let mut parts = split_path(path);
+    if parts.iter().any(|p| same_entry(p, entry)) {
+        return None;
+    }
+    if parts.len() == 1 && parts[0].is_empty() {
+        parts.clear();
+    }
+    if positions.is_empty() {
+        parts.push(entry.to_string());
+    }
+    for &at in positions {
+        let at = at.min(parts.len());
+        parts.insert(at, entry.to_string());
+    }
+    Some(parts.join(";"))
 }
 
 fn same_entry(a: &str, b: &str) -> bool {
-    let clean = |s: &str| s.trim().trim_end_matches('\\').to_lowercase();
+    let clean = |s: &str| s.trim().trim_matches('"').trim_end_matches('\\').to_lowercase();
     !a.trim().is_empty() && clean(a) == clean(b)
 }
 
@@ -609,9 +647,11 @@ mod imp {
                 delete(target)?;
                 Ok((Backup::TaskXml { file: file.into() }, None))
             }
-            Target::PathEntry { .. } => {
-                delete(target)?;
-                Ok((Backup::Entry, None))
+            Target::PathEntry { scope, entry } => {
+                let (key, text, vtype) = read_path(scope)?;
+                let (next, positions) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
+                write_path(&key, &next, vtype)?;
+                Ok((Backup::PathEntry { positions }, None))
             }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
         }
@@ -633,7 +673,11 @@ mod imp {
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
-        let text = String::from_utf16_lossy(&units).trim_end_matches('\0').to_string();
+        // Characters that don't round-trip would be changed by a rewrite.
+        let text = String::from_utf16(&units)
+            .map_err(|_| Error::Other("PATH holds characters UWiper can't edit safely".into()))?
+            .trim_end_matches('\0')
+            .to_string();
         Ok((key, text, raw.vtype))
     }
 
@@ -696,7 +740,7 @@ mod imp {
             Target::Task { path } => run_tool("schtasks.exe", &["/Delete", "/TN", path, "/F"]).map(|_| ()),
             Target::PathEntry { scope, entry } => {
                 let (key, text, vtype) = read_path(scope)?;
-                let next = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
+                let (next, _) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
                 write_path(&key, &next, vtype)
             }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
@@ -740,9 +784,9 @@ mod imp {
                 )
                 .map(|_| ())
             }
-            (Target::PathEntry { scope, entry }, Backup::Entry) => {
+            (Target::PathEntry { scope, entry }, Backup::PathEntry { positions }) => {
                 let (key, text, vtype) = read_path(scope)?;
-                match with_entry(&text, entry) {
+                match with_entry(&text, entry, positions) {
                     Some(next) => write_path(&key, &next, vtype),
                     None => Ok(()),
                 }
@@ -838,21 +882,36 @@ mod tests {
 
     #[test]
     fn edits_path_entries() {
-        let path = r"C:\Windows;C:\Gone\bin\;%USERPROFILE%\tools";
-        assert_eq!(
-            without_entry(path, r"c:\gone\BIN").as_deref(),
-            Some(r"C:\Windows;%USERPROFILE%\tools")
-        );
+        let path = r"C:\Windows;C:\Gone\bin\;%USERPROFILE%\tools;C:\gone\bin";
+        let (without, positions) = without_entry(path, r"c:\gone\BIN").unwrap();
+        assert_eq!(without, r"C:\Windows;%USERPROFILE%\tools");
+        assert_eq!(positions, vec![1, 3]);
         assert_eq!(without_entry(path, r"C:\Other"), None);
         assert_eq!(
-            with_entry(r"C:\Windows;", r"C:\Gone\bin").as_deref(),
-            Some(r"C:\Windows;C:\Gone\bin")
+            with_entry(&without, r"C:\Gone\bin", &positions).as_deref(),
+            Some(r"C:\Windows;C:\Gone\bin;%USERPROFILE%\tools;C:\Gone\bin"),
+            "back where it was"
         );
-        assert_eq!(with_entry(path, r"C:\Gone\bin"), None);
-        assert!(guard()
+        assert_eq!(with_entry("", r"C:\x", &[]).as_deref(), Some(r"C:\x"));
+        assert_eq!(with_entry(path, r"C:\Gone\bin", &[]), None);
+        // A quoted entry keeps its ";".
+        let quoted = r#"C:\a;"C:\b;c";C:\d"#;
+        assert_eq!(split_path(quoted), vec![r"C:\a", r#""C:\b;c""#, r"C:\d"]);
+        assert_eq!(
+            without_entry(quoted, r"C:\b;c").map(|r| r.0).as_deref(),
+            Some(r"C:\a;C:\d")
+        );
+        let g = guard();
+        assert!(g
             .check(&Target::PathEntry {
                 scope: "user".into(),
                 entry: "a;b".into()
+            })
+            .is_err());
+        assert!(g
+            .check(&Target::PathEntry {
+                scope: "user".into(),
+                entry: r"D:\Games\bin".into()
             })
             .is_err());
     }

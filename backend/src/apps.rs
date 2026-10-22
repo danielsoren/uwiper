@@ -39,7 +39,7 @@ pub struct InstalledApp {
     pub(crate) quiet_uninstall_string: Option<String>,
     registry_key: String,
     #[serde(skip)]
-    display_icon: Option<String>,
+    pub(crate) display_icon: Option<String>,
 }
 
 /// Lists installed apps with their real size and icon, so nothing changes

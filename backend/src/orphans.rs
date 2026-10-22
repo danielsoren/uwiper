@@ -22,7 +22,7 @@ use crate::leftovers::{
 };
 use crate::settings::Settings;
 use crate::targets::{Guard, Target};
-use crate::util::{canonical, expand_env, split_command};
+use crate::util::{canonical, expand_env, program_state, split_command};
 use crate::AppState;
 
 #[derive(Serialize, Debug)]
@@ -117,7 +117,8 @@ impl Owners {
             }
             let parts: Vec<String> = program.split(['\\', '/']).map(str::to_lowercase).collect();
             if let Some(start) = parts.iter().position(|p| ROOT_NAMES.contains(&p.as_str())) {
-                for part in &parts[start + 1..parts.len().saturating_sub(1)] {
+                let end = parts.len().saturating_sub(1);
+                for part in parts.get(start + 1..end).unwrap_or_default() {
                     add(squash(part));
                 }
             }
@@ -320,7 +321,8 @@ fn is_gone(path: &str) -> Option<bool> {
     if bytes.len() < 3 || bytes[1] != b':' || bytes[2] != b'\\' || !Path::new(&path[..3]).exists() {
         return None;
     }
-    Some(!Path::new(&path).exists())
+    // Only "not found" means gone; access denied or a leftover %VARIABLE% can't tell.
+    program_state(&path).map(|exists| !exists)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,20 +361,35 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
     let owners = Owners::new(&apps, &programs);
     let mut found = Found::new(Guard::new(settings), owners.folders.clone(), false);
 
-    // Apps listed as installed whose uninstaller and folder are both gone.
+    // Apps listed as installed whose uninstaller is gone. Certain only when
+    // their folder is known to be gone too; otherwise the app may still be there.
     for app in &apps {
-        if app_is_gone(app) {
-            if let Some(key) = apps::uninstall_key_path(&app.id) {
+        let Some(key) = apps::uninstall_key_path(&app.id) else {
+            continue;
+        };
+        match presence(app) {
+            Presence::Gone => {
                 let reason = format!(
                     "«{}» is listed as installed, but its uninstaller and folder are gone",
                     app.name
                 );
                 found.add("app", Target::RegistryKey { key }, &reason, "high");
             }
+            Presence::UninstallerGone => {
+                let reason = format!(
+                    "«{}» is listed as installed, but its uninstaller is gone – the app may still be there",
+                    app.name
+                );
+                found.add("app", Target::RegistryKey { key }, &reason, "low");
+            }
+            Presence::Fine => {}
         }
     }
 
-    for item in startup.into_iter().filter(|i| i.file_exists == Some(false)) {
+    for item in startup
+        .into_iter()
+        .filter(|i| i.file_exists == Some(false) && !i.is_windows)
+    {
         let reason = format!("«{}» starts a program that no longer exists", item.name);
         found.add("startup", item.removal, &reason, "high");
     }
@@ -402,8 +419,11 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
         for entry in walker.into_iter().flatten() {
             let path = entry.path();
             if entry.file_type().is_dir() {
+                // The Desktop's folders are the user's own; Startup is Windows'.
+                let in_start_menu = dir.to_string_lossy().to_lowercase().ends_with(r"start menu\programs");
+                let name = file_name(path);
                 let empty = std::fs::read_dir(path).is_ok_and(|mut it| it.next().is_none());
-                if empty && !is_system_name(&file_name(path)) {
+                if in_start_menu && empty && !is_system_name(&name) && !name.eq_ignore_ascii_case("startup") {
                     found.add_path(path, "Empty Start menu folder", "medium");
                 }
                 continue;
@@ -421,24 +441,25 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
         }
     }
 
-    // PATH entries and App Paths that point nowhere.
+    // PATH entries that point nowhere. Tools such as npm, dotnet or go add
+    // a folder they create on first use, so a missing one is only a guess.
+    let windows = crate::util::windows_dir();
     for (scope, entry) in path_entries() {
-        if is_gone(&entry) == Some(true) {
-            let reason = if scope == "machine" {
-                "In the system PATH, but the folder no longer exists"
-            } else {
-                "In your PATH, but the folder no longer exists"
-            };
-            found.add(
-                "environment",
-                Target::PathEntry {
-                    scope: scope.into(),
-                    entry,
-                },
-                reason,
-                "high",
-            );
+        let expanded = expand_env(&entry);
+        if is_gone(&entry) != Some(true) || crate::util::is_within(&expanded, &windows) {
+            continue;
         }
+        let whose = if scope == "machine" {
+            "the system PATH"
+        } else {
+            "your PATH"
+        };
+        let reason = format!("In {whose}, but the folder doesn't exist – some tools create it on first use");
+        let target = Target::PathEntry {
+            scope: scope.into(),
+            entry,
+        };
+        found.add("environment", target, &reason, "low");
     }
     for (key, exe) in imp::app_paths() {
         if is_gone(&exe) == Some(true) {
@@ -507,20 +528,35 @@ pub fn scan(settings: &Settings) -> Result<OrphanScan> {
     })
 }
 
-/// The app's uninstaller and its folder are both gone. MSI apps are left
-/// out: Windows Installer removes them by product code.
-fn app_is_gone(app: &InstalledApp) -> bool {
+enum Presence {
+    Fine,
+    /// The uninstaller is gone, but the app's files may still be there.
+    UninstallerGone,
+    /// The uninstaller and the app's folder are both gone.
+    Gone,
+}
+
+/// MSI apps are left out: Windows Installer removes them by product code.
+fn presence(app: &InstalledApp) -> Presence {
     if app.source == "msi" {
-        return false;
+        return Presence::Fine;
     }
     let Some((program, _)) = app.uninstall_string.as_deref().and_then(split_command) else {
-        return false;
+        return Presence::Fine;
     };
-    let folder_gone = app
-        .install_location
-        .as_deref()
-        .is_none_or(|dir| is_gone(dir) != Some(false));
-    is_gone(&program) == Some(true) && folder_gone
+    if is_gone(&program) != Some(true) {
+        return Presence::Fine;
+    }
+    // The app's own folder, or the folder of its icon, decides.
+    let folder = app.install_location.clone().or_else(|| {
+        let icon = app.display_icon.as_deref().and_then(crate::icons::parse_spec)?;
+        icon.0.parent().map(|p| p.to_string_lossy().into_owned())
+    });
+    match folder.as_deref().map(is_gone) {
+        Some(Some(true)) => Presence::Gone,
+        Some(Some(false)) => Presence::Fine,
+        _ => Presence::UninstallerGone,
+    }
 }
 
 #[cfg(not(windows))]

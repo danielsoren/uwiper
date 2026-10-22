@@ -140,6 +140,33 @@ pub fn file_state(path: &str) -> Option<bool> {
     }
 }
 
+/// Variables that point into the profile of whoever runs the program.
+const PER_USER_VARS: [&str; 7] = [
+    "%appdata%",
+    "%localappdata%",
+    "%userprofile%",
+    "%temp%",
+    "%tmp%",
+    "%homepath%",
+    "%onedrive%",
+];
+
+/// True when a command depends on which user runs it, so from this user's
+/// view a missing file says nothing about another user's.
+pub fn uses_per_user_vars(command: &str) -> bool {
+    let c = command.to_lowercase();
+    PER_USER_VARS.iter().any(|v| c.contains(v))
+}
+
+/// `file_state` for a program path, and `None` when the path still holds
+/// a variable that couldn't be expanded.
+pub fn program_state(path: &str) -> Option<bool> {
+    if path.contains('%') {
+        return None;
+    }
+    file_state(path)
+}
+
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn is_windows_path(path: &str) -> bool {
     let windir = windows_dir().to_ascii_lowercase();

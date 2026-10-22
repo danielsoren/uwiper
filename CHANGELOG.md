@@ -18,7 +18,7 @@ Leftovers of apps that are long gone, and a lot more junk and caches. Still a be
   - PATH and App Paths entries pointing nowhere;
   - startup entries, services and tasks whose programs are missing.
 
-  Missing files are certain (High), empty folders and keys likely (Medium), and unclaimed folders and keys only possible (Low – never picked for you). Every find shows when it last changed.
+  Missing programs and shortcut targets are certain (High), empty folders and keys likely (Medium). Unclaimed folders and keys, PATH entries whose folder doesn't exist yet and apps whose uninstaller alone is gone are only possible (Low – never picked for you). Every find shows when it last changed.
 - 🧹 **More junk and caches.**
   - Any Chromium or Firefox-based browser is found by its folder layout, not just a list of names.
   - App caches are found by folder name, Microsoft Store apps included.

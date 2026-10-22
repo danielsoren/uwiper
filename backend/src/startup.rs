@@ -45,7 +45,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::util::{expand_env, file_state, is_windows_path, resolve_executable};
+    use crate::util::{expand_env, is_windows_path, program_state, resolve_executable, uses_per_user_vars};
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
     use winreg::RegKey;
 
@@ -121,7 +121,13 @@ mod imp {
                 id: format!("{location}|{name}"),
                 enabled: approved(root, approved_sub, &name),
                 is_windows: target.as_deref().is_some_and(is_windows_path),
-                file_exists: target.as_deref().and_then(file_state),
+                // Machine-wide entries run for every user: a per-user path
+                // missing for this user may be there for another.
+                file_exists: if key_path.starts_with("HKLM") && uses_per_user_vars(&command) {
+                    None
+                } else {
+                    target.as_deref().and_then(program_state)
+                },
                 target,
                 removal: Target::RegistryValue {
                     key: key_path.to_string(),
