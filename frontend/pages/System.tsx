@@ -81,6 +81,7 @@ export function System() {
   const attempt = useAppStore((s) => s.attempt);
   const notify = useAppStore((s) => s.notify);
   const update = useAppStore((s) => s.update);
+  const refresh = useAppStore((s) => s.refresh);
   const afterChange = useAppStore((s) => s.afterChange);
   const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
   const startup = useResource('startup');
@@ -106,21 +107,16 @@ export function System() {
     if (focus && (TABS as string[]).includes(focus)) setTab(focus as Tab);
   }, [focus]);
 
-  /** Shows the change at once and takes it back if Windows refuses it. */
+  /** Shows the change at once, then reads the list again: that shows what Windows really has, also when it refused. */
   const change = async <T,>(key: ResourceKey, id: string, is: (i: T) => boolean, next: Partial<T>, run: () => Promise<void>) => {
-    let before: T | undefined;
-    const patch = (edit: (i: T) => T) => update(key, (list) => (list as T[]).map((i) => (is(i) ? edit(i) : i)) as never);
-    patch((i) => {
-      before = i;
-      return { ...i, ...next };
-    });
+    update(key, (list) => (list as T[]).map((i) => (is(i) ? { ...i, ...next } : i)) as never);
     setBusy((b) => new Set(b).add(id));
     try {
       await run();
     } catch (e) {
-      if (before) patch(() => before!);
       notify(errorText(e));
     }
+    refresh(key);
     setBusy((b) => {
       const rest = new Set(b);
       rest.delete(id);
@@ -230,16 +226,16 @@ export function System() {
     ((tab === 'startup' && (startup.data ?? []).some((i) => i.needsAdmin && !i.isWindows && i.fileExists !== false)) ||
       (tab === 'services' && visible.some((r) => !r.windows && !r.problem)));
 
-  // Drivers: older versions no device uses are picked to start with.
+  // Drivers: only older versions that are surely spare are picked to start with.
   const driverItems = drivers.data ?? [];
   const canRemove = (d: DriverItem) => elevated && !d.inUse;
   useEffect(() => {
-    setPicked(new Set((drivers.data ?? []).filter((d) => d.old && !d.inUse && elevated).map((d) => d.id)));
+    setPicked(new Set((drivers.data ?? []).filter((d) => d.suggested && elevated).map((d) => d.id)));
   }, [drivers.data, elevated]);
   const shownDrivers = oldOnly ? driverItems.filter((d) => d.old) : driverItems;
   const chosen = driverItems.filter((d) => picked.has(d.id));
   const chosenBytes = chosen.reduce((s, d) => s + (d.sizeBytes ?? 0), 0);
-  const oldBytes = driverItems.filter((d) => d.old && !d.inUse).reduce((s, d) => s + (d.sizeBytes ?? 0), 0);
+  const oldBytes = driverItems.filter((d) => d.suggested).reduce((s, d) => s + (d.sizeBytes ?? 0), 0);
 
   const removeDrivers = async () => {
     setConfirming(false);
@@ -323,8 +319,8 @@ export function System() {
           <>
             <Note>
               Driver packages that apps and Windows Update added. Each update leaves the previous version in the Driver Store, and
-              Windows never removes it. <strong>Older versions</strong> no device uses are safe to remove – Windows refuses to remove a
-              package that is in use.
+              Windows never removes it. UWiper picks <strong>older versions</strong> nothing uses while a device runs the newest one.
+              Printer drivers and packages a device, service or printer still uses are never picked.
             </Note>
             {drivers.error && <Callout message={drivers.error} action="Try again" onAction={drivers.reload} />}
             {!elevated && driverItems.length > 0 && adminCallout('Removing driver packages needs administrator rights.')}
@@ -342,7 +338,7 @@ export function System() {
                   {chosen.length > 0
                     ? `${plural(chosen.length, 'package', 'packages')} selected · ${formatBytes(chosenBytes)}`
                     : oldBytes > 0
-                      ? `${formatBytes(oldBytes)} in older versions no device uses`
+                      ? `${formatBytes(oldBytes)} in older versions nothing uses`
                       : null}
                 </div>
               </>

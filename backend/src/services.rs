@@ -94,7 +94,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::util::{command_executable, expand_env, file_state, is_windows_path, normalize_system_path};
+    use crate::util::{command_executable, expand_env, file_state, is_windows_component, normalize_system_path};
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
     use winreg::RegKey;
 
@@ -120,7 +120,8 @@ mod imp {
         let failed = || {
             let e = std::io::Error::last_os_error();
             match e.raw_os_error() {
-                Some(5) => Error::NeedsAdmin,
+                // UWiper runs as administrator by now: this one is protected.
+                Some(5) => Error::Other("Windows protects this service – it can't be changed".into()),
                 _ => Error::Io(e),
             }
         };
@@ -135,20 +136,10 @@ mod imp {
                 CloseServiceHandle(manager);
                 return Err(e);
             }
-            let mut ok = ChangeServiceConfigW(
-                service,
-                SERVICE_NO_CHANGE,
-                start_type,
-                SERVICE_NO_CHANGE,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            ) != 0;
-            if ok && start_type == SERVICE_AUTO_START {
+            // The delayed flag first: it only counts for automatic services, so
+            // a failure here leaves the start type as it was.
+            let mut ok = true;
+            if start_type == SERVICE_AUTO_START {
                 let info = SERVICE_DELAYED_AUTO_START_INFO {
                     fDelayedAutostart: i32::from(delayed),
                 };
@@ -158,6 +149,20 @@ mod imp {
                     &info as *const SERVICE_DELAYED_AUTO_START_INFO as *const core::ffi::c_void,
                 ) != 0;
             }
+            ok = ok
+                && ChangeServiceConfigW(
+                    service,
+                    SERVICE_NO_CHANGE,
+                    start_type,
+                    SERVICE_NO_CHANGE,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                ) != 0;
             let e = (!ok).then(failed);
             CloseServiceHandle(service);
             CloseServiceHandle(manager);
@@ -198,7 +203,7 @@ mod imp {
                 .unwrap_or_else(|| name.clone());
             out.push(ServiceItem {
                 file_exists: binary.as_deref().and_then(file_state),
-                is_windows: binary.as_deref().is_none_or(is_windows_path),
+                is_windows: binary.as_deref().is_none_or(is_windows_component),
                 binary,
                 start_type: start_type(key.get_value("Start").unwrap_or(3)),
                 delayed: key.get_value::<u32, _>("DelayedAutostart").unwrap_or(0) == 1,

@@ -174,6 +174,26 @@ pub fn is_windows_path(path: &str) -> bool {
     p.starts_with(&format!("{windir}\\"))
 }
 
+/// Windows itself, also its parts outside the Windows folder: Defender,
+/// Windows Media Player and the Update Health Tools in Program Files, and
+/// Defender's platform in ProgramData.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn is_windows_component(path: &str) -> bool {
+    let p = norm_path(path);
+    let under = |var: &str, parts: &[&str]| {
+        std::env::var(var).is_ok_and(|root| {
+            let root = norm_path(&root);
+            !root.is_empty() && parts.iter().any(|part| p.starts_with(&format!(r"{root}\{part}")))
+        })
+    };
+    let program_files = ["windows", "microsoft update health tools"];
+    is_windows_path(path)
+        || under("ProgramFiles", &program_files)
+        || under("ProgramW6432", &program_files)
+        || under("ProgramFiles(x86)", &program_files)
+        || under("ProgramData", &[r"microsoft\windows defender"])
+}
+
 /// Lowercase, backslashes, no trailing separator: for comparing Windows paths.
 pub fn norm_path(path: &str) -> String {
     path.trim().replace('/', "\\").trim_end_matches('\\').to_lowercase()

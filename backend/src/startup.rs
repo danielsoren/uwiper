@@ -81,7 +81,9 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::util::{expand_env, is_windows_path, now_secs, program_state, resolve_executable, uses_per_user_vars};
+    use crate::util::{
+        expand_env, is_windows_component, now_secs, program_state, resolve_executable, uses_per_user_vars,
+    };
     use winreg::enums::{RegType, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY};
     use winreg::{RegKey, RegValue};
 
@@ -188,7 +190,7 @@ mod imp {
             out.push(StartupItem {
                 id: format!("{location}|{name}"),
                 enabled: approved(root, approved_sub, &name),
-                is_windows: target.as_deref().is_some_and(is_windows_path),
+                is_windows: target.as_deref().is_some_and(is_windows_component),
                 // Machine-wide entries run for every user: a per-user path
                 // missing for this user may be there for another.
                 file_exists: if machine && uses_per_user_vars(&command) {

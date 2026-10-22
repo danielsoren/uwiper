@@ -4,7 +4,7 @@ import type { DriverItem } from '../../lib/types';
 import { Checkbox, IconTile, ListCard, Pill, type PillTone } from '../../ui';
 
 const STATE: Record<'inUse' | 'old' | 'spare', { label: string; tone: PillTone; hint: string }> = {
-  inUse: { label: 'In use', tone: 'good', hint: 'A device is set up with this package, so Windows keeps it' },
+  inUse: { label: 'In use', tone: 'good', hint: 'A device, a service or a printer uses this package' },
   old: { label: 'Older version', tone: 'warn', hint: 'A newer version of this package is in the Driver Store' },
   spare: { label: 'Not in use', tone: 'dim', hint: 'No device is set up with it, but it is the only version – it may be for a device you connect now and then' },
 };

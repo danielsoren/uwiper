@@ -573,6 +573,22 @@ pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
     }
 }
 
+/// Picks the package's INF among the files of an export: the one with its own
+/// name, or the only one. A package can carry other INFs too.
+fn choose_inf(mut found: Vec<(usize, String)>, original: Option<&str>) -> Option<String> {
+    found.sort();
+    match original {
+        Some(name) => found.into_iter().find(|(_, path)| {
+            path.rsplit(['\\', '/'])
+                .next()
+                .is_some_and(|f| f.eq_ignore_ascii_case(name))
+        }),
+        None if found.len() == 1 => found.pop(),
+        None => None,
+    }
+    .map(|(_, path)| path)
+}
+
 #[cfg(not(windows))]
 mod imp {
     use super::*;
@@ -678,10 +694,11 @@ mod imp {
                 let folder = dir.join("driver");
                 std::fs::create_dir_all(&folder)?;
                 run_tool("pnputil.exe", &["/export-driver", inf, &folder.to_string_lossy()])?;
-                let exported = exported_inf(&folder).ok_or(Error::Other("Windows didn't export the package".into()));
-                let removed = exported.and_then(|file| delete(target).map(|_| file));
-                match removed {
-                    Ok(file) => Ok((Backup::Driver { inf: file }, None)),
+                // Only once the package's own INF is in the export can it be put back.
+                let exported = exported_inf(&folder, driver_original_inf(inf).as_deref())
+                    .ok_or(Error::Other("Windows didn't export the whole package".into()));
+                match exported.and_then(|file| delete_driver(inf).map(|note| (file, note))) {
+                    Ok((file, note)) => Ok((Backup::Driver { inf: file }, note)),
                     Err(e) => {
                         let _ = remove_path(&folder);
                         Err(e)
@@ -693,21 +710,44 @@ mod imp {
     }
 
     /// The package's INF inside an export, as a path relative to the item folder.
-    fn exported_inf(folder: &Path) -> Option<String> {
+    fn exported_inf(folder: &Path, original: Option<&str>) -> Option<String> {
         let parent = folder.parent()?;
-        walkdir::WalkDir::new(folder)
+        let found: Vec<(usize, String)> = walkdir::WalkDir::new(folder)
             .max_depth(2)
-            .sort_by_file_name()
             .into_iter()
             .flatten()
             .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("inf")))
-            .min_by_key(|e| e.depth())
-            .and_then(|e| {
-                e.path()
-                    .strip_prefix(parent)
-                    .ok()
-                    .map(|p| p.to_string_lossy().into_owned())
+            .filter_map(|e| {
+                let relative = e.path().strip_prefix(parent).ok()?.to_string_lossy().into_owned();
+                Some((e.depth(), relative))
             })
+            .collect();
+        choose_inf(found, original)
+    }
+
+    /// The package's own INF name (`nv_dispi.inf`), from its Driver Store folder.
+    fn driver_original_inf(inf: &str) -> Option<String> {
+        let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+            .open_subkey_with_flags(format!(r"SYSTEM\DriverDatabase\DriverInfFiles\{inf}"), KEY_READ)
+            .ok()?;
+        let folder = key
+            .get_value::<String, _>("Active")
+            .ok()
+            .or_else(|| key.get_value::<Vec<String>, _>("").ok()?.into_iter().next())?;
+        let end = folder.to_lowercase().find(".inf_")?;
+        folder.get(..end + 4).map(str::to_string)
+    }
+
+    /// Removes a package and checks that it's gone: pnputil can report an error
+    /// (3010 – restart needed) for a package it did remove, and the other way round.
+    fn delete_driver(inf: &str) -> Result<Option<String>> {
+        let result = run_tool("pnputil.exe", &["/delete-driver", inf]);
+        if PathBuf::from(windows_dir()).join("INF").join(inf).exists() {
+            return Err(result.err().unwrap_or(Error::Other("Windows kept the package".into())));
+        }
+        Ok(result
+            .err()
+            .map(|_| "Removed – Windows may need a restart to finish".to_string()))
     }
 
     const MACHINE_ENV: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
@@ -792,7 +832,7 @@ mod imp {
             }
             Target::Task { path } => run_tool("schtasks.exe", &["/Delete", "/TN", path, "/F"]).map(|_| ()),
             // Without /force, Windows refuses a package a device still uses.
-            Target::Driver { inf } => run_tool("pnputil.exe", &["/delete-driver", inf]).map(|_| ()),
+            Target::Driver { inf } => delete_driver(inf).map(|_| ()),
             Target::PathEntry { scope, entry } => {
                 let (key, text, vtype) = read_path(scope)?;
                 let (next, _) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
@@ -1040,8 +1080,34 @@ mod tests {
         let driver = |inf: &str| Target::Driver { inf: inf.into() };
         assert!(g.check(&driver("oem12.inf")).is_ok());
         assert!(g.check(&driver("OEM7.INF")).is_ok());
-        for bad in ["oem.inf", "nv_dispi.inf", "oem12.inf.bak", r"..\oem1.inf", "oem1a.inf", "machine.inf"] {
+        for bad in [
+            "oem.inf",
+            "nv_dispi.inf",
+            "oem12.inf.bak",
+            r"..\oem1.inf",
+            "oem1a.inf",
+            "machine.inf",
+        ] {
             assert!(g.check(&driver(bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn restores_the_packages_own_inf() {
+        let found = vec![
+            (1, r"driver\a_child.inf".to_string()),
+            (1, r"driver\nv_dispi.inf".to_string()),
+            (2, r"driver\sub\other.inf".to_string()),
+        ];
+        assert_eq!(
+            choose_inf(found.clone(), Some("NV_DISPI.inf")).as_deref(),
+            Some(r"driver\nv_dispi.inf")
+        );
+        assert_eq!(choose_inf(found.clone(), Some("missing.inf")), None);
+        assert_eq!(choose_inf(found, None), None, "several INFs and no name: don't guess");
+        assert_eq!(
+            choose_inf(vec![(1, r"driver\x.inf".into())], None).as_deref(),
+            Some(r"driver\x.inf")
+        );
     }
 }

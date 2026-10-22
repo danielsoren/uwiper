@@ -94,6 +94,13 @@ pub fn list() -> Result<Vec<TaskItem>> {
     Ok(out)
 }
 
+/// "Microsoft Corporation", or a resource string from a Windows file such as
+/// `$(@%SystemRoot%\system32\wininet.dll,-16000)`.
+fn is_windows_author(author: &str) -> bool {
+    let a = author.trim().to_lowercase();
+    a.starts_with("microsoft") || a.starts_with("$(@%systemroot%") || a.starts_with("$(@%windir%")
+}
+
 fn trigger_label(tag: &str) -> &'static str {
     match tag {
         "LogonTrigger" => "At log on",
@@ -122,6 +129,7 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
     };
 
     let exec = doc.descendants().find(|n| is(n, "Exec"));
+    let author = child_text(doc.descendants().find(|n| is(n, "RegistrationInfo")), "Author").unwrap_or_default();
     let settings = doc.descendants().find(|n| is(n, "Settings"));
     let enabled = child_text(settings, "Enabled").is_none_or(|v| v != "false");
     let command = child_text(exec, "Command");
@@ -144,7 +152,8 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
         .unwrap_or_default();
     let binary = command.as_deref().and_then(resolve_executable);
     Some(TaskItem {
-        is_windows: name.starts_with("Microsoft\\"),
+        // Windows' own tasks also sit outside the Microsoft folder; their author says whose they are.
+        is_windows: name.starts_with("Microsoft\\") || is_windows_author(&author),
         // A task may run as another user, whose profile a per-user path points into.
         file_exists: if command.as_deref().is_some_and(uses_per_user_vars) {
             None
@@ -198,5 +207,17 @@ mod tests {
         assert!(!task.enabled);
         assert_eq!(task.triggers, "At log on, On a schedule");
         assert!(!task.is_windows);
+    }
+
+    #[test]
+    fn windows_tasks_outside_the_microsoft_folder() {
+        let xml = TASK.replace(
+            "<Triggers>",
+            "<RegistrationInfo><Author>$(@%SystemRoot%\\system32\\shell32.dll,-1)</Author></RegistrationInfo><Triggers>",
+        );
+        let task = parse(xml.as_bytes(), Path::new("CreateExplorerShellUnelevatedTask")).unwrap();
+        assert!(task.is_windows);
+        assert!(is_windows_author("Microsoft Corporation"));
+        assert!(!is_windows_author("Google LLC"));
     }
 }

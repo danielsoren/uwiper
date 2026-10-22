@@ -24,10 +24,14 @@ pub struct DriverItem {
     size_bytes: Option<u64>,
     /// A device it drives – or, for an older version, one its newest version drives.
     device: Option<String>,
-    /// A device (connected or not) is set up with it, so Windows won't remove it.
+    /// A device (connected or not) is set up with it, or a service or printer
+    /// driver runs from it.
     in_use: bool,
     /// A newer version of the same package is in the Driver Store.
     old: bool,
+    /// Safe to pick for removal: an older version nothing uses, while a device
+    /// uses the newest one – proof the device moved on.
+    suggested: bool,
     removal: Target,
 }
 
@@ -203,6 +207,21 @@ struct Package {
     info: InfInfo,
     size_bytes: Option<u64>,
     devices: Vec<String>,
+    /// A service or a printer driver runs from its Driver Store folder.
+    used: bool,
+}
+
+/// Printers, extension INFs and non-Plug and Play drivers can be in use in
+/// ways no device key shows, so they're never picked for removal.
+const NEVER_SUGGESTED: [&str; 4] = ["printer", "printqueue", "extension", "legacydriver"];
+
+/// The Driver Store folder a path points into, lowercase.
+fn store_folder_in(path: &str) -> Option<String> {
+    let lower = path.to_lowercase().replace('/', "\\");
+    let marker = r"\driverstore\filerepository\";
+    let start = lower.find(marker)? + marker.len();
+    let folder = lower[start..].split('\\').next()?;
+    (!folder.is_empty()).then(|| folder.to_string())
 }
 
 /// Marks every package that has a newer version of itself, and lends the
@@ -241,6 +260,12 @@ fn finish(packages: Vec<Package>) -> Vec<DriverItem> {
             let old = top.is_some_and(|t| t != i && rank(&packages[t]) > rank(p));
             let named = |p: &Package| p.devices.iter().find(|n| !n.is_empty()).cloned();
             let device = named(p).or_else(|| top.and_then(|t| named(&packages[t])));
+            let in_use = !p.devices.is_empty() || p.used;
+            let class = p.info.class.as_deref().unwrap_or_default().to_lowercase();
+            let suggested = old
+                && !in_use
+                && top.is_some_and(|t| !packages[t].devices.is_empty())
+                && !NEVER_SUGGESTED.contains(&class.as_str());
             DriverItem {
                 id: p.id.clone(),
                 inf: p.inf.clone(),
@@ -250,8 +275,9 @@ fn finish(packages: Vec<Package>) -> Vec<DriverItem> {
                 date: p.info.date.clone(),
                 size_bytes: p.size_bytes,
                 device,
-                in_use: !p.devices.is_empty(),
+                in_use,
                 old,
+                suggested,
                 removal: Target::Driver { inf: p.id.clone() },
             }
         })
@@ -287,6 +313,7 @@ mod imp {
     use super::*;
     use crate::targets::is_published_inf;
     use crate::util::{decode_text, dir_size, parallel_map, windows_dir};
+    use std::collections::HashSet;
     use std::path::PathBuf;
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
     use winreg::RegKey;
@@ -319,6 +346,7 @@ mod imp {
         published.sort();
         let store = PathBuf::from(&windows).join(r"System32\DriverStore\FileRepository");
         let devices = devices(&hklm);
+        let users = store_users(&hklm);
 
         let packages = parallel_map(&published, |(path, id, folder)| {
             let info = parse_inf(&decode_text(&std::fs::read(path).ok()?));
@@ -335,6 +363,7 @@ mod imp {
                 .map(|p| dir_size(&p).0);
             Some(Package {
                 devices: devices.get(&id.to_lowercase()).cloned().unwrap_or_default(),
+                used: folder.as_ref().is_some_and(|f| users.contains(&f.to_lowercase())),
                 id: id.clone(),
                 inf,
                 info,
@@ -342,6 +371,35 @@ mod imp {
             })
         });
         Ok(finish(packages.into_iter().flatten().collect()))
+    }
+
+    /// Driver Store folders that services and printer drivers run from.
+    fn store_users(hklm: &RegKey) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let open = |key: &RegKey, name: &str| key.open_subkey_with_flags(name, KEY_READ);
+        if let Ok(services) = open(hklm, r"SYSTEM\CurrentControlSet\Services") {
+            for name in services.enum_keys().flatten() {
+                let image = open(&services, &name).and_then(|k| k.get_value::<String, _>("ImagePath"));
+                out.extend(image.ok().as_deref().and_then(store_folder_in));
+            }
+        }
+        if let Ok(environments) = open(hklm, r"SYSTEM\CurrentControlSet\Control\Print\Environments") {
+            for environment in environments.enum_keys().flatten() {
+                let Ok(drivers) = open(&environments, &format!(r"{environment}\Drivers")) else {
+                    continue;
+                };
+                for version in drivers.enum_keys().flatten() {
+                    let Ok(version_key) = open(&drivers, &version) else {
+                        continue;
+                    };
+                    for driver in version_key.enum_keys().flatten() {
+                        let inf = open(&version_key, &driver).and_then(|k| k.get_value::<String, _>("InfPath"));
+                        out.extend(inf.ok().as_deref().and_then(store_folder_in));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Published INF name (lowercase) to the names of the devices set up with it,
@@ -431,6 +489,7 @@ NVIDIA = "NVIDIA; Corp"
             },
             size_bytes: Some(1),
             devices: devices.iter().map(|d| d.to_string()).collect(),
+            used: false,
         }
     }
 
@@ -456,13 +515,55 @@ NVIDIA = "NVIDIA; Corp"
         ]);
         let get = |id: &str| items.iter().find(|i| i.id == id).unwrap();
         assert!(!get("oem9.inf").old && get("oem9.inf").in_use);
-        assert!(get("oem3.inf").old && !get("oem3.inf").in_use);
+        assert!(get("oem3.inf").old && !get("oem3.inf").in_use && get("oem3.inf").suggested);
         assert!(get("oem5.inf").old);
         assert!(!get("oem7.inf").old, "the only version of its package");
         assert_eq!(get("oem3.inf").device.as_deref(), Some("NVIDIA GeForce RTX 3080"));
         let nameless = finish(vec![package("oem1.inf", "x.inf", "2024-01-01", "1.0", &[""])]);
         assert!(nameless[0].in_use && nameless[0].device.is_none());
         assert_eq!(get("oem7.inf").class, "Display adapters");
+    }
+
+    #[test]
+    fn picks_only_what_nothing_uses() {
+        let mut printer = package("oem2.inf", "hpprint.inf", "2021-01-01", "1.0", &[]);
+        printer.info.class = Some("Printer".into());
+        let mut printer_new = package("oem4.inf", "hpprint.inf", "2022-01-01", "2.0", &["HP LaserJet"]);
+        printer_new.info.class = Some("Printer".into());
+        let mut serviced = package("oem6.inf", "vpn.inf", "2021-01-01", "1.0", &[]);
+        serviced.used = true;
+        let items = finish(vec![
+            printer,
+            printer_new,
+            serviced,
+            package("oem8.inf", "vpn.inf", "2022-01-01", "2.0", &["VPN adapter"]),
+            // The newest version isn't on any device either: nothing proves the old one is spare.
+            package("oem10.inf", "cam.inf", "2021-01-01", "1.0", &[]),
+            package("oem11.inf", "cam.inf", "2022-01-01", "2.0", &[]),
+        ]);
+        let get = |id: &str| items.iter().find(|i| i.id == id).unwrap();
+        assert!(
+            get("oem2.inf").old && !get("oem2.inf").suggested,
+            "printers are never picked"
+        );
+        assert!(
+            get("oem6.inf").in_use && !get("oem6.inf").suggested,
+            "a service runs from it"
+        );
+        assert!(get("oem10.inf").old && !get("oem10.inf").suggested);
+    }
+
+    #[test]
+    fn finds_driver_store_folders_in_paths() {
+        assert_eq!(
+            store_folder_in(r"\SystemRoot\System32\DriverStore\FileRepository\vpn.inf_amd64_ab12\vpn.sys").as_deref(),
+            Some("vpn.inf_amd64_ab12")
+        );
+        assert_eq!(
+            store_folder_in(r"C:\Windows\System32\DriverStore\FileRepository\hp.inf_amd64_9f\hp.inf").as_deref(),
+            Some("hp.inf_amd64_9f")
+        );
+        assert_eq!(store_folder_in(r"C:\Windows\System32\drivers\x.sys"), None);
     }
 
     #[test]

@@ -16,8 +16,8 @@ Startup entries, services and scheduled tasks can now be switched, and old drive
   - services can be set to Automatic, Automatic (delayed), Manual or Disabled;
   - scheduled tasks turn on and off.
 
-  Windows' own entries, services and tasks stay read-only, and every change is written to the log.
-- 🧩 **Old driver packages.** A new Drivers tab lists the third-party packages in the Driver Store with their version, date, size and the device they drive. Every driver update leaves the previous version behind, and Windows never removes it – older versions no device uses are picked for you. They go to quarantine as an export and come back into the Driver Store with Restore. A package a device still uses is never removed.
+  Windows' own entries, services and tasks stay read-only – also the ones outside the Windows folder, like Defender – and every change is written to the log.
+- 🧩 **Old driver packages.** A new Drivers tab lists the third-party packages in the Driver Store with their version, date, size and the device they drive. Every driver update leaves the previous version behind, and Windows never removes it. UWiper picks the older versions nothing uses while a device runs the newest one. They go to quarantine as an export and come back into the Driver Store with Restore. Packages a device, a service or a printer still uses are never removed, and printer drivers are never picked for you.
 
 ### Better
 

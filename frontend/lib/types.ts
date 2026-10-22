@@ -177,6 +177,8 @@ export interface DriverItem {
   inUse: boolean;
   /** A newer version of the same package is in the Driver Store. */
   old: boolean;
+  /** An older version nothing uses while a device uses the newest: picked to start with. */
+  suggested: boolean;
   removal: Target;
 }
 
