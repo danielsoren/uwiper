@@ -41,6 +41,7 @@ The first full release. An independent safety audit of 0.5 went through everythi
 
 - The step numbers in Installs sit in the middle of their circles.
 - The middle window button turns into Restore when the window is maximized.
+- Right-clicking no longer opens the browser's menu (Back, Refresh, Print), and browser shortcuts like F5 and Ctrl+P do nothing. Text fields and selected text keep Copy and Paste.
 
 ## [0.5.0-beta.1] – 2026-10-22
 
