@@ -279,8 +279,8 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
             <>
               <LeftoverReview items={step.leftovers} selected={selected} onChange={setSelected} canRemove={canRemove} />
               <Note>
-                <strong>High</strong> – certainly the app's. <strong>Medium</strong> – named after it. <strong>Low</strong> – may be shared
-                with other apps from the same publisher; check before removing.
+                <strong>High</strong> – certainly the app's, ticked for you. <strong>Medium</strong> – named after it: look before ticking.{' '}
+                <strong>Low</strong> – may be shared or still in use; check before removing.
               </Note>
             </>
           )}
