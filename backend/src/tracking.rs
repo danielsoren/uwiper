@@ -712,6 +712,67 @@ fn changes(before: &Snapshot, salt: &str, after: &Look) -> Changes {
     out
 }
 
+/// Names that tie something to an install: the app's, its publisher's and
+/// the installer's (without versions), squashed.
+fn install_tokens(app: Option<&AppInfo>, installer: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |t: String| {
+        if t.len() >= 3 && !out.contains(&t) {
+            out.push(t);
+        }
+    };
+    if let Some(app) = app {
+        add(squash(&clean_name(&app.name)));
+        if let Some(publisher) = app.publisher.as_deref() {
+            add(squash(&clean_publisher(publisher)));
+        }
+        // "Mozilla Firefox" is also "Firefox".
+        if let Some((_, rest)) = clean_name(&app.name).split_once(' ') {
+            add(squash(rest));
+        }
+    }
+    if let Some(stem) = installer.and_then(|p| Path::new(p).file_stem()) {
+        let stem = stem.to_string_lossy().to_lowercase();
+        // "OBS-Studio-31.1.2-Windows-Installer" → "obsstudio"; "setup_ravenswatch_1.4" → "ravenswatch".
+        let words: Vec<&str> = stem
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty() && !w.chars().all(|c| c.is_ascii_digit()))
+            .filter(|w| {
+                ![
+                    "setup",
+                    "install",
+                    "installer",
+                    "windows",
+                    "win",
+                    "win64",
+                    "x64",
+                    "x86",
+                    "amd64",
+                    "release",
+                    "full",
+                    "v",
+                ]
+                .contains(w)
+            })
+            .collect();
+        add(words.concat());
+        for w in words {
+            add(w.to_string());
+        }
+    }
+    out
+}
+
+/// A name matches when it's one of the tokens, or one starts with the other
+/// (four letters at least): "JetBrains" and "JetBrains s.r.o.".
+fn names_match(name: &str, tokens: &[String]) -> bool {
+    let n = squash(&clean_name(name));
+    n.len() >= 3
+        && tokens
+            .iter()
+            .any(|t| *t == n || (n.len() >= 4 && t.len() >= 4 && (t.starts_with(&n) || n.starts_with(t.as_str()))))
+}
+
 fn installer_name(installer: Option<&str>) -> Option<String> {
     installer
         .and_then(|p| Path::new(p).file_name())
@@ -768,6 +829,41 @@ fn draft(
     let main_dir = main.as_ref().and_then(|a| a.location.as_deref()).map(canonical);
     let long_window = now_secs().saturating_sub(info.started_at) > LONG_WINDOW_SECS;
 
+    // What links a new thing to this install, beyond appearing at the same
+    // time: the app's names, and where its shortcuts and programs point.
+    let tokens = install_tokens(main.as_ref(), info.installer.as_deref());
+    let pointed: Vec<String> = new
+        .iter()
+        .filter_map(|e| match (&e.target, e.kind) {
+            (Target::Path { path }, "shortcut") => std::fs::read(path)
+                .ok()
+                .filter(|b| b.len() < 1 << 20)
+                .and_then(|b| crate::orphans::shortcut_target(&b))
+                .map(|t| canonical(&t)),
+            _ => e.program.as_deref().map(canonical),
+        })
+        .collect();
+    let linked = |e: &Entry| -> bool {
+        let last = match &e.target {
+            Target::Path { path } | Target::RegistryKey { key: path } => path
+                .trim_end_matches('\\')
+                .rsplit('\\')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            _ => return false,
+        };
+        let stem = last.rsplit_once('.').map_or(last.as_str(), |(s, _)| s);
+        if names_match(stem, &tokens) || names_match(&last, &tokens) {
+            return true;
+        }
+        let Target::Path { path } = &e.target else { return false };
+        let here = canonical(path);
+        main_dir
+            .as_deref()
+            .is_some_and(|d| !d.is_empty() && (is_within(d, &here) || is_within(&here, d)))
+            || pointed.iter().any(|p| is_within(p, &here))
+    };
     let mut items: Vec<Entry> = new
         .iter()
         .filter(|e| match &e.target {
@@ -776,16 +872,20 @@ fn draft(
         })
         .cloned()
         .map(|mut e| {
-            // A service, task or startup entry is surely the installer's when
-            // it runs something the installer added, and never when it runs
-            // something of an app that came along.
             if let Some(program) = e.program.as_deref().map(canonical) {
+                // A service, task or startup entry is surely the installer's when
+                // it runs something the installer added, and never when it runs
+                // something of an app that came along.
                 let in_also = also.iter().any(|a| inside(a.location.as_deref(), &program));
                 e.sure = !in_also
                     && (new_dirs.iter().any(|d| is_within(&program, d))
                         || main_dir
                             .as_deref()
                             .is_some_and(|d| !d.is_empty() && is_within(&program, d)));
+            } else if e.sure && matches!(e.kind, "folder" | "file" | "shortcut" | "registry") {
+                // Appearing during the install isn't proof on its own: another
+                // app may have made it at the same time.
+                e.sure = linked(&e);
             }
             if long_window {
                 e.sure = false;
@@ -1053,11 +1153,17 @@ pub(crate) fn add_to(found: &mut Found, trace: &Trace, other_folders: &[String])
         if matches!(&item.target, Target::Path { path } if elsewhere(path)) {
             continue;
         }
-        let confidence = if item.sure { "high" } else { "medium" };
-        let reason = if item.sure {
+        // An app's data folder that changed since may hold the user's own files.
+        let changed_data = item.sure
+            && matches!(&item.target, Target::Path { path } if in_data_place(path)
+                && dir_stats(Path::new(path)).2.is_some_and(|newest| newest > trace.finished_at + 60));
+        let confidence = if item.sure && !changed_data { "high" } else { "medium" };
+        let reason = if changed_data {
+            format!("Added when it was installed, and changed since – it may hold your data. Tracked {date}")
+        } else if item.sure {
             format!("Added when it was installed – tracked {date}")
         } else {
-            format!("Added inside a folder that was already there while it was installed – tracked {date}")
+            format!("Appeared while it was installed, but may be another app's – tracked {date}")
         };
         let added_since: Vec<String> = match (&item.children, children_of(&item.target)) {
             (Some(then), Some(now)) => now.into_iter().filter(|n| !then.contains(n)).collect(),
@@ -1090,6 +1196,21 @@ pub(crate) fn add_to(found: &mut Found, trace: &Trace, other_folders: &[String])
             }
         }
     }
+}
+
+/// AppData and ProgramData: where apps keep data, rather than their program
+/// files (per-user programs in Local\Programs aren't data).
+fn in_data_place(path: &str) -> bool {
+    let p = canonical(path);
+    let programs = env("LOCALAPPDATA").map(|l| canonical(&format!(r"{l}\Programs")));
+    if programs.is_some_and(|d| is_within(&p, &d)) {
+        return false;
+    }
+    ["APPDATA", "LOCALAPPDATA", "ProgramData"]
+        .iter()
+        .filter_map(|v| env(v))
+        .chain(env("USERPROFILE").map(|u| format!(r"{u}\AppData\LocalLow")))
+        .any(|root| is_within(&p, &canonical(&root)))
 }
 
 /// Traces that belong to an installed app, for its leftover scan.
@@ -1965,6 +2086,22 @@ mod tests {
             location: None,
         };
         assert!(!belongs(&trace, &[], &other));
+    }
+
+    #[test]
+    fn names_tie_things_to_the_install() {
+        let obsidian = app("1", "Obsidian", "Obsidian", None);
+        let tokens = install_tokens(Some(&obsidian), Some(r"C:\Downloads\Obsidian-1.7.7.exe"));
+        assert!(names_match("obsidian", &tokens));
+        assert!(!names_match("Code", &tokens));
+        let none = install_tokens(None, Some(r"C:\Downloads\setup_ravenswatch_1.4.exe"));
+        assert!(names_match("Ravenswatch", &none));
+        assert!(!names_match("Khronos", &none));
+        let jb = install_tokens(
+            Some(&app("2", "PyCharm Community Edition", "JetBrains s.r.o.", None)),
+            None,
+        );
+        assert!(names_match("JetBrains", &jb));
     }
 
     #[test]

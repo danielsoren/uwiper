@@ -63,7 +63,7 @@ const asLeftover = (i: TraceDraft['items'][number]): Leftover => ({
       ? "New, but it runs something the installer didn't add"
       : i.kind === 'driver' || i.kind === 'environment'
         ? 'New – Windows or another app may have added it'
-        : 'New, inside a place that was already there – another app may have made it',
+        : "New, but nothing ties it to this install – another app may have made it",
   confidence: i.sure ? 'high' : 'medium',
   sizeBytes: i.sizeBytes,
   modified: null,
