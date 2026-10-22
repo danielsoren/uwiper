@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.0.0] – 2026-10-22
+
+The first full release. An independent safety audit of 0.5 went through everything UWiper offers to remove; every finding is fixed here.
+
+### Download
+
+- **UWiper.exe** – the app itself. Put it in any folder and run it.
+- **UWiper-v1.0.0-portable.zip** – the same, in a folder.
+
+### Safer cleanup
+
+- Steam, Epic Games and Battle.net: only the cache folders of their built-in browsers are cleaned. Sign-ins, cookies and history stay.
+- Cookies, history, site storage, sign-ins and browser settings are never cleaned, whatever category a folder comes from.
+- Nothing is cleaned through a link or junction, at the folder itself or any folder above it.
+- Crash reports and Windows Update downloads are off by default. Temp keeps files changed in the last day.
+- The report tells files in use, files Windows refused and other failures apart.
+
+### More accurate leftovers
+
+- A folder on the Desktop is never a leftover, whatever its name – only shortcuts there are. A Start menu folder is offered whole only when it holds nothing but shortcuts.
+- Folders with saved games are always Low.
+- Services, Microsoft Store apps and running programs count as owners. Shared registration keys such as ASIO are never offered.
+- Low finds now say UWiper couldn't match them, not that nothing uses them.
+- A scheduled task counts as broken only when every one of its actions runs a program that's gone.
+- Only High finds are picked to start with. Settings that still had the old High & Medium default move to High only.
+
+### Removing and restoring
+
+- Every find is checked again right before it's removed. Anything that changed since the scan is skipped with a note to scan again.
+- Quarantine backs an item up and records it on disk before changing anything. If the record can't be written, nothing more is removed. The next start finishes whatever a crash interrupted.
+- Restore leaves things alone that are there again (a reinstalled app's settings, service or task) and keeps the quarantined copy.
+
+### Drivers and install tracking
+
+- Driver Store locations come from Windows' own SetupAPI, so every package is found and paired with its other versions. Extension packages and packages UWiper can't locate show Unknown and are never removed.
+- Install tracking marks something as the installer's only when something ties it to the install. An app's data folder that changed after the install is Medium at uninstall time.
+
+### Fixed
+
+- The step numbers in Installs sit in the middle of their circles.
+- The middle window button turns into Restore when the window is maximized.
+
 ## [0.5.0-beta.1] – 2026-10-22
 
 Install tracking: UWiper notes what an installer adds, so uninstalling the app later removes all of it.
