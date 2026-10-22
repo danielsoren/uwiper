@@ -22,7 +22,7 @@ function Steps({ step }: { step: Step }) {
           {i > 0 && <span className="h-px w-5 bg-line-2" />}
           <span
             className={cn(
-              'grid size-5 place-items-center rounded-full text-micro font-semibold',
+              'grid size-5 place-items-center rounded-full text-micro font-semibold leading-[normal] tabular-nums',
               i < at ? 'bg-good/18 text-good' : i === at ? 'bg-accent text-white' : 'bg-white/8 text-fg-4',
             )}
           >
