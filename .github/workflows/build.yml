@@ -83,7 +83,8 @@ jobs:
         run: |
           for log in ci-*.log; do
             [ -f "$log" ] || continue
-            lines=$(grep -E "^(error|warning)|error\[|panicked|FAILED" "$log" | head -n 10)
+            # No match is fine: the shell stops on a failing pipe otherwise.
+            lines=$(grep -E "^(error|warning)|error\[|panicked|FAILED|assertion" "$log" | head -n 20 || true)
             [ -n "$lines" ] || lines=$(tail -n 10 "$log")
             while IFS= read -r line; do echo "::error title=$log::$line"; done <<< "$lines"
           done

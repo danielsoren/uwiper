@@ -596,10 +596,11 @@ mod tests {
 
     #[test]
     fn driver_packages_go_only_when_surely_unused() {
+        // A package no PC has, so Windows' own can't answer for it.
         let item = Removal {
-            label: "oem12.inf".into(),
+            label: "oem99999.inf".into(),
             target: Target::Driver {
-                inf: "oem12.inf".into(),
+                inf: "oem99999.inf".into(),
             },
             size_bytes: 0,
             check: None,

@@ -828,7 +828,8 @@ mod tests {
         // No Q: drive here: an unplugged USB stick, say.
         assert_eq!(file_state(r"Q:\Tools\gone.exe"), None);
         assert_eq!(file_state(r"bin\gone.exe"), None, "a relative path can't be told");
-        assert_eq!(file_state("/surely/not/here.exe"), Some(false));
+        let gone = std::env::temp_dir().join(format!("uwiper-surely-gone-{}.exe", std::process::id()));
+        assert_eq!(file_state(&gone.to_string_lossy()), Some(false));
     }
 
     #[test]
