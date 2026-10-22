@@ -16,7 +16,8 @@
 <p align="center">
   UWiper runs an app's own uninstaller, then hunts down everything it left – folders, registry keys, services,<br>
   scheduled tasks, startup entries, shortcuts – and shows you the list before anything is touched.<br>
-  Everything goes to quarantine first, so one click brings it all back.
+  Everything goes to quarantine first, so one click brings it all back. Track an install,<br>
+  and uninstalling the app later leaves nothing behind at all.
 </p>
 
 <p align="center">
@@ -34,6 +35,7 @@
 
 |  |  |
 | --- | --- |
+| 📦 **Install tracking** | Track an install, and UWiper notes everything the installer adds – folders, registry keys, services, tasks, shortcuts, drivers. Uninstalling the app later removes all of it. Snapshots hold names only, never contents. |
 | 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like. |
 | 🔎 **Leftovers, explained** | Every find says why it's there and how sure UWiper is: **High** – certainly the app's, **Medium** – named after it, **Low** – may be shared. You tick what goes. |
 | ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML, driver packages exported. Restore a whole batch in one click. Batches are deleted for good after 30 days (you choose). |
@@ -69,7 +71,15 @@
   </tr>
   <tr>
     <td align="center"><sub><b>Services, startup and tasks</b> – switch them right there</sub></td>
-    <td align="center"><sub><b>Old drivers</b> – older versions no device uses</sub></td>
+    <td align="center"><sub><b>Old drivers</b> – older versions nothing uses</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/tracking.webp" alt="Reviewing what an installer added"></td>
+    <td width="50%"><img src="assets/screenshots/installs.webp" alt="Tracked installs with what's still there"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Track an install</b> – see what the installer added</sub></td>
+    <td align="center"><sub><b>Tracked installs</b> – uninstall or clean up what's left</sub></td>
   </tr>
 </table>
 
@@ -90,8 +100,8 @@
 - [x] **v0.1** – the foundation: design, administrator mode, installed apps
 - [x] **v0.2** – uninstall with a leftover scan, quarantine and restore
 - [x] **v0.3** – entries without an owner, junk and caches
-- [x] **v0.4** – startup, services, scheduled tasks and drivers: switch them on and off, remove old driver packages ← *you are here*
-- [ ] **v0.5** – install tracking: snapshot what an installer creates, for a perfect uninstall later
+- [x] **v0.4** – startup, services, scheduled tasks and drivers: switch them on and off, remove old driver packages
+- [x] **v0.5** – install tracking: snapshot what an installer creates, for a perfect uninstall later ← *you are here*
 
 Ideas and bug reports are welcome in [Issues](https://github.com/danielsoren/uwiper/issues) 💬
 
@@ -123,6 +133,7 @@ backend/             Rust + Tauri
   src/services.rs    services, their binaries and how they start
   src/tasks.rs       scheduled task XML under System32\Tasks, on and off
   src/drivers.rs     third-party driver packages and their older versions
+  src/tracking.rs    install tracking: snapshots, what's new, traces
   src/paths.rs       where UWiper keeps its own data
   src/settings.rs    settings.toml
   src/log.rs         daily log of every change
