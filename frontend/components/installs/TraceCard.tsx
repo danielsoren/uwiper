@@ -64,7 +64,7 @@ export function TraceCard({
         ) : (
           left > 0 && (
             <Button small icon="trash" onClick={onCleanUp}>
-              Remove what's left
+              {trace.appId ? "Remove what's left" : 'Remove what it added'}
             </Button>
           )
         )}

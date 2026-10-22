@@ -67,6 +67,7 @@ export const api = {
   startTracking: () => call<TrackingStatus>('start_tracking'),
   launchInstaller: (path: string) => call<void>('launch_installer', { path }),
   finishTracking: () => call<TraceDraft>('finish_tracking'),
+  chooseTraceApp: (appId: string | null) => call<TraceDraft>('choose_trace_app', { appId }),
   saveTrace: (keep: string[]) => call<Trace>('save_trace', { keep }),
   cancelTracking: () => call<void>('cancel_tracking'),
   listTraces: () => call<TraceView[]>('list_traces'),

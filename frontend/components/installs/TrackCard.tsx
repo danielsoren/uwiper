@@ -4,13 +4,14 @@ import { cn } from '../../lib/cn';
 import { formatBytes, plural } from '../../lib/format';
 import type { Leftover, TraceDraft } from '../../lib/types';
 import { useAppStore } from '../../store/useAppStore';
-import { Button, Card, Empty, Icon, Note, Spinner } from '../../ui';
+import { Button, Callout, Card, Empty, Icon, Note, Select, Spinner } from '../../ui';
 import { LeftoverReview } from '../leftovers/LeftoverReview';
 
 type Step = 'intro' | 'snapshot' | 'installing' | 'comparing' | 'review';
 
 const STEPS = ['Snapshot', 'Install', 'Review'];
 const STEP_INDEX: Record<Step, number> = { intro: 0, snapshot: 0, installing: 1, comparing: 2, review: 2 };
+const NO_APP = '';
 
 function Steps({ step }: { step: Step }) {
   const at = STEP_INDEX[step];
@@ -43,12 +44,26 @@ function Working({ text }: { text: string }) {
   );
 }
 
+/** "Oct 22, 01:34 (2 h 10 min ago)" */
+function since(unix: number): string {
+  const at = new Date(unix * 1000);
+  const minutes = Math.max(0, Math.round((Date.now() / 1000 - unix) / 60));
+  const ago = minutes < 1 ? 'just now' : minutes < 60 ? `${minutes} min ago` : `${Math.floor(minutes / 60)} h ${minutes % 60} min ago`;
+  return `${at.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}, ${at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })} (${ago})`;
+}
+
 /** A draft item in the shape the leftover review shows. */
 const asLeftover = (i: TraceDraft['items'][number]): Leftover => ({
   id: i.id,
   kind: i.kind,
   label: i.label,
-  reason: i.sure ? 'New' : 'Inside a folder that was already there – another app running at the same time may have made it',
+  reason: i.sure
+    ? 'New'
+    : ['service', 'task', 'startup'].includes(i.kind)
+      ? "New, but it runs something the installer didn't add"
+      : i.kind === 'driver' || i.kind === 'environment'
+        ? 'New – Windows or another app may have added it'
+        : 'New, inside a place that was already there – another app may have made it',
   confidence: i.sure ? 'high' : 'medium',
   sizeBytes: i.sizeBytes,
   modified: null,
@@ -61,12 +76,15 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
   const env = useAppStore((s) => s.env);
   const tracking = useAppStore((s) => s.res.tracking.data);
   const load = useAppStore((s) => s.load);
+  const update = useAppStore((s) => s.update);
   const refresh = useAppStore((s) => s.refresh);
   const notify = useAppStore((s) => s.notify);
+  const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
   const [step, setStep] = useState<Step>(tracking?.active ? 'installing' : 'intro');
   const [draft, setDraft] = useState<TraceDraft | null>(null);
   const [keep, setKeep] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
 
   // While installing, keep an eye on the installer UWiper started.
   useEffect(() => {
@@ -79,6 +97,23 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (tracking?.active && step === 'intro') setStep('installing');
   }, [tracking?.active, step]);
+
+  const elevated = !!env?.elevated;
+  const mismatch = !!tracking?.active && tracking.elevated !== elevated;
+
+  const show = (found: TraceDraft) => {
+    setDraft(found);
+    setKeep(new Set(found.items.filter((i) => i.sure).map((i) => i.id)));
+  };
+
+  const launch = async (path: string) => {
+    try {
+      await api.launchInstaller(path);
+    } catch (e) {
+      notify(errorText(e));
+    }
+    load('tracking', true);
+  };
 
   const start = async (withInstaller: boolean) => {
     const installer = withInstaller ? await pickInstaller() : null;
@@ -96,21 +131,10 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
     setStep('installing');
   };
 
-  const launch = async (path: string) => {
-    try {
-      await api.launchInstaller(path);
-    } catch (e) {
-      notify(errorText(e));
-    }
-    load('tracking', true);
-  };
-
   const finish = async () => {
     setStep('comparing');
     try {
-      const found = await api.finishTracking();
-      setDraft(found);
-      setKeep(new Set(found.items.filter((i) => i.sure).map((i) => i.id)));
+      show(await api.finishTracking());
       setStep('review');
     } catch (e) {
       notify(errorText(e));
@@ -118,12 +142,29 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const choose = async (appId: string) => {
+    setBusy(true);
+    try {
+      show(await api.chooseTraceApp(appId === NO_APP ? null : appId));
+    } catch (e) {
+      notify(errorText(e));
+    }
+    setBusy(false);
+  };
+
+  /** Tracking is over: the card goes away without waiting for the next status. */
+  const over = () => {
+    setDone(true);
+    update('tracking', (t) => ({ ...t, active: false, startedAt: null, installer: null }));
+    refresh('tracking');
+    onClose();
+  };
+
   const cancel = async () => {
     setBusy(true);
     try {
       await api.cancelTracking();
-      refresh('tracking');
-      onClose();
+      over();
     } catch (e) {
       notify(errorText(e));
     }
@@ -131,13 +172,13 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
   };
 
   const save = async () => {
-    if (!draft) return;
+    if (!draft || done) return;
     setBusy(true);
     try {
       await api.saveTrace([...keep]);
       notify(`Saved what «${draft.name}» added`);
-      refresh('traces', 'tracking', 'apps');
-      onClose();
+      refresh('traces', 'apps');
+      over();
     } catch (e) {
       notify(errorText(e));
     }
@@ -146,7 +187,7 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
 
   const kept = draft?.items.filter((i) => keep.has(i.id)) ?? [];
   const keptBytes = kept.reduce((s, i) => s + (i.sizeBytes ?? 0), 0);
-  const since = tracking?.startedAt ? new Date(tracking.startedAt * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : null;
+  const long = !!tracking?.startedAt && Date.now() / 1000 - tracking.startedAt > 3 * 3600;
 
   return (
     <Card className="flex flex-col gap-4 px-[22px] py-5">
@@ -161,7 +202,7 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
             UWiper takes a snapshot now, you install the app, and UWiper looks at what's new. Close other apps first – anything they
             add in the meantime could look like the installer's.
           </p>
-          {!env?.elevated && <Note>Scheduled tasks are only seen with administrator rights – the rest is tracked either way.</Note>}
+          {!elevated && <Note>Scheduled tasks are only seen with administrator rights – restart UWiper as administrator first to include them.</Note>}
           <div className="flex flex-wrap gap-2.5">
             <Button kind="primary" icon="install" onClick={() => start(true)}>
               Choose installer…
@@ -178,28 +219,54 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
 
       {step === 'installing' && (
         <>
+          {mismatch && (
+            <Callout
+              message={
+                tracking?.elevated
+                  ? 'Tracking was started with administrator rights. Restart UWiper as administrator to finish it – or stop tracking.'
+                  : 'Tracking was started without administrator rights. Open UWiper normally to finish it – or stop tracking.'
+              }
+              action={tracking?.elevated ? 'Restart as administrator' : undefined}
+              onAction={tracking?.elevated ? restartAsAdmin : undefined}
+            />
+          )}
           <div className="flex items-start gap-3">
-            <span className={cn('mt-0.5 grid size-8 flex-none place-items-center rounded-full', tracking?.installerRunning ? 'bg-accent/20 text-accent-soft' : 'bg-white/8 text-fg-3')}>
+            <span
+              className={cn(
+                'mt-0.5 grid size-8 flex-none place-items-center rounded-full',
+                tracking?.installerRunning ? 'bg-accent/20 text-accent-soft' : 'bg-white/8 text-fg-3',
+              )}
+            >
               {tracking?.installerRunning ? <Spinner size={15} /> : <Icon name="install" size={16} />}
             </span>
             <div>
               <div className="text-label font-semibold">
-                {tracking?.installer
-                  ? tracking.installerRunning
-                    ? `«${tracking.installer}» is running`
-                    : `«${tracking.installer}» has closed`
-                  : 'Run the installer now'}
+                {!tracking?.installer
+                  ? 'Run the installer now'
+                  : !tracking.installerFollowed
+                    ? `Install «${tracking.installer}»`
+                    : tracking.installerRunning
+                      ? `«${tracking.installer}» is running`
+                      : `«${tracking.installer}» has closed`}
               </div>
-              <p className="mt-1 max-w-[640px] text-small leading-normal text-fg-3">
-                {tracking?.installerRunning
-                  ? 'Go through it the way you normally would. If it opens the app at the end, that first start is part of the trace too.'
-                  : 'When the installer has finished – and the app has opened once, if you like – click Done.'}
-                {since && ` Tracking since ${since}; you can close UWiper or restart Windows in between.`}
+              <p className="mt-1 max-w-[680px] text-small leading-normal text-fg-3">
+                {tracking?.installer && !tracking.installerFollowed
+                  ? "UWiper can't tell whether it's still running – click Done once it has finished."
+                  : tracking?.installerRunning
+                    ? 'Go through it the way you normally would. If it opens the app at the end, that first start is part of the trace too.'
+                    : 'When the installer has finished – and the app has opened once, if you like – click Done.'}
+                {tracking?.startedAt && ` Tracking since ${since(tracking.startedAt)}. You can close UWiper or restart Windows in between.`}
               </p>
             </div>
           </div>
+          {long && (
+            <Note icon="warning">
+              Tracking has been on for a long time, so other apps had plenty of time to add things too. Nothing will be ticked for you – look
+              through the list, or stop tracking and start again right before installing.
+            </Note>
+          )}
           <div className="flex flex-wrap gap-2.5">
-            <Button kind="primary" icon="check" onClick={finish}>
+            <Button kind="primary" icon="check" disabled={mismatch} onClick={finish}>
               Done installing
             </Button>
             {!tracking?.installer && (
@@ -224,18 +291,38 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
 
       {step === 'review' && draft && (
         <>
-          <div>
-            <div className="text-label font-semibold">What «{draft.name}» added</div>
-            <div className="mt-0.5 text-small text-fg-3">
-              {[draft.publisher, draft.version && `version ${draft.version}`].filter(Boolean).join(' · ') || 'No app registered itself – the trace is named after the installer'}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-label font-semibold">What «{draft.name}» added</div>
+              <div className="mt-0.5 text-small text-fg-3">
+                {draft.appId
+                  ? [draft.publisher, draft.version && `version ${draft.version}`].filter(Boolean).join(' · ')
+                  : 'Not linked to an installed app – the trace is named after the installer'}
+              </div>
             </div>
+            {draft.candidates.length > 0 && (
+              <label className="inline-flex items-center gap-2 text-meta text-fg-2">
+                Belongs to
+                <Select
+                  label="The app this install was for"
+                  value={draft.appId ?? NO_APP}
+                  disabled={busy}
+                  options={[...draft.candidates.map((c) => ({ value: c.id, label: c.name })), { value: NO_APP, label: 'No app' }]}
+                  onChange={choose}
+                  className="max-w-[260px]"
+                />
+              </label>
+            )}
           </div>
           {draft.updated && <Note>«{draft.name}» was already installed, so this was an update: only what it added is here.</Note>}
           {draft.alsoInstalled.length > 0 && (
             <Note>
-              Also installed: {draft.alsoInstalled.map((n) => `«${n}»`).join(', ')}. What belongs to {draft.alsoInstalled.length > 1 ? 'them' : 'it'} stays
-              out of this trace – other apps may need {draft.alsoInstalled.length > 1 ? 'them' : 'it'}.
+              Also installed: {draft.alsoInstalled.map((n) => `«${n}»`).join(', ')}. What's in {draft.alsoInstalled.length > 1 ? 'their folders' : 'its folder'}{' '}
+              stays out of this trace – other apps may need {draft.alsoInstalled.length > 1 ? 'them' : 'it'}.
             </Note>
+          )}
+          {draft.longWindow && (
+            <Note icon="warning">Tracking ran for hours, so nothing is ticked – other apps had time to add things too. Tick what's the app's.</Note>
           )}
           {!draft.tasksChecked && <Note>Scheduled tasks weren't checked – UWiper needs administrator rights to see them.</Note>}
           {draft.items.length === 0 ? (
@@ -245,10 +332,10 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
           ) : (
             <>
               <p className="text-small leading-normal text-fg-3">
-                Untick anything that isn't the app's. <strong className="font-semibold text-fg-2">Medium</strong> items appeared inside folders
-                that were already there, so they're left out unless you tick them.
+                Untick anything that isn't the app's. <strong className="font-semibold text-fg-2">Medium</strong> items might be another app's,
+                so they're left out unless you tick them.
               </p>
-              <LeftoverReview items={draft.items.map(asLeftover)} selected={keep} onChange={setKeep} canRemove={() => true} appTitle="Its entry in installed apps" />
+              <LeftoverReview items={draft.items.map(asLeftover)} selected={keep} onChange={setKeep} canRemove={() => true} />
             </>
           )}
           <div className="flex flex-wrap items-center justify-end gap-2.5">
@@ -258,10 +345,10 @@ export function TrackCard({ onClose }: { onClose: () => void }) {
               </span>
             )}
             {draft.items.length === 0 && <Button onClick={() => setStep('installing')}>Back</Button>}
-            <Button kind="ghost" busy={busy && kept.length === 0} onClick={cancel}>
+            <Button kind="ghost" disabled={busy || done} onClick={cancel}>
               Discard
             </Button>
-            <Button kind="primary" icon="check" disabled={kept.length === 0} busy={busy && kept.length > 0} onClick={save}>
+            <Button kind="primary" icon="check" disabled={kept.length === 0 || done} busy={busy} onClick={save}>
               Save trace
             </Button>
           </div>

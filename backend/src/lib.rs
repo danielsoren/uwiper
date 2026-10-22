@@ -62,6 +62,7 @@ pub fn run() {
             tracking::start_tracking,
             tracking::launch_installer,
             tracking::finish_tracking,
+            tracking::choose_trace_app,
             tracking::save_trace,
             tracking::cancel_tracking,
             tracking::list_traces,

@@ -275,7 +275,8 @@ let traces: Trace[] = [
 ];
 // Items of the second trace that the uninstaller already removed.
 const traceGone = new Set(['folder:c:\\games\\ravenswatch', 'shortcut:c:\\users\\you\\desktop\\ravenswatch.lnk']);
-let tracking: TrackingStatus & { launchedAt?: number } = { active: false, startedAt: null, installer: null, installerRunning: false };
+const idleTracking: TrackingStatus = { active: false, startedAt: null, elevated: false, installer: null, installerFollowed: false, installerRunning: false };
+let tracking: TrackingStatus & { launchedAt?: number } = idleTracking;
 let draft: TraceDraft | null = null;
 
 const traceViews = (): TraceView[] =>
@@ -286,15 +287,14 @@ function sampleDraft(): TraceDraft {
   const roaming = 'C:\\Users\\you\\AppData\\Roaming';
   const sized = (i: TraceItem, mb: number | null) => ({ ...i, sizeBytes: mb === null ? null : mb * MB });
   return {
-    name: 'Obsidian', appId: 'HKLM|Obsidian', publisher: 'Obsidian', version: '1.7.7', updated: false,
-    alsoInstalled: [], tasksChecked: environment.elevated,
+    startedAt: tracking.startedAt ?? now(), name: 'Obsidian', appId: 'HKLM|Obsidian', publisher: 'Obsidian', version: '1.7.7', updated: false,
+    alsoInstalled: [], candidates: [{ id: 'HKLM|Obsidian', name: 'Obsidian' }], tasksChecked: environment.elevated, longWindow: false,
     items: [
       sized(pathItem('folder', `${local}\\Programs\\Obsidian`), 412),
       sized(pathItem('folder', `${roaming}\\obsidian`), 3),
       sized(pathItem('shortcut', `${roaming}\\Microsoft\\Windows\\Start Menu\\Programs\\Obsidian.lnk`), 0.002),
       sized(pathItem('shortcut', 'C:\\Users\\you\\Desktop\\Obsidian.lnk'), 0.002),
       sized(keyItem('registry', 'HKCU\\Software\\obsidian'), null),
-      sized(keyItem('app', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Obsidian'), null),
       sized(pathItem('folder', `${roaming}\\Code\\logs\\20261022T101500`, false), 1),
     ],
   };
@@ -336,22 +336,27 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
       }
       case 'start_tracking': {
         if (tracking.active) throw new Error('An install is already being tracked');
-        tracking = { active: true, startedAt: now(), installer: null, installerRunning: false };
+        tracking = { ...idleTracking, active: true, startedAt: now(), elevated: environment.elevated };
         return tracking;
       }
-      case 'launch_installer': tracking = { ...tracking, installer: (args?.path as string).split('\\').pop() ?? null, launchedAt: Date.now() }; return null;
+      case 'launch_installer': tracking = { ...tracking, installer: (args?.path as string).split('\\').pop() ?? null, installerFollowed: true, launchedAt: Date.now() }; return null;
       case 'finish_tracking': draft = sampleDraft(); return draft;
+      case 'choose_trace_app': {
+        const base = sampleDraft();
+        draft = args?.appId ? base : { ...base, appId: null, publisher: null, version: null, name: 'Obsidian-1.7.7' };
+        return draft;
+      }
       case 'save_trace': {
         if (!draft) throw new Error('Compare again before saving');
         const keep = args?.keep as string[];
         const saved: Trace = { id: `${now()}-obsidian`, name: draft.name, appId: draft.appId, publisher: draft.publisher, version: draft.version, installer: tracking.installer, startedAt: tracking.startedAt ?? now(), finishedAt: now(), alsoInstalled: draft.alsoInstalled, items: draft.items.filter((i) => keep.includes(i.id)).map(({ sizeBytes: _, ...i }) => i) };
         traces = [saved, ...traces];
         if (!apps.some((a) => a.id === 'HKLM|Obsidian')) apps = [...apps, app('Obsidian', 'Obsidian', '1.7.7', 412, '2026-10-22', 'C:\\Users\\you\\AppData\\Local\\Programs\\Obsidian', 'win32', 'user')];
-        tracking = { active: false, startedAt: null, installer: null, installerRunning: false };
+        tracking = idleTracking;
         draft = null;
         return saved;
       }
-      case 'cancel_tracking': tracking = { active: false, startedAt: null, installer: null, installerRunning: false }; draft = null; return null;
+      case 'cancel_tracking': tracking = idleTracking; draft = null; return null;
       case 'list_traces': return traceViews();
       case 'delete_trace': traces = traces.filter((t) => t.id !== args?.id); return null;
       case 'trace_leftovers': return traceLeftovers(args?.id as string);

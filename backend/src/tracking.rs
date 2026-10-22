@@ -2,14 +2,17 @@
 //! after it. What's new is saved as the app's trace, and a later uninstall
 //! uses it to find everything the installer added.
 //!
-//! Snapshots and traces hold only names – of files, folders, registry keys,
-//! services and the like – never anything inside them, and stay in UWiper's
-//! own folder.
+//! Private: the snapshot on disk holds only salted hashes of names, and a
+//! trace holds names – of files, folders, registry keys and the like – never
+//! anything inside them. Both stay in UWiper's own folder.
 //!
-//! Each place is looked at two levels down: a new folder in Program Files, or
-//! a new folder inside a vendor's folder that was already there. Anything
-//! deeper inside a folder that already existed is left out, since other apps
-//! running at the same time write there too.
+//! Accurate: each place is looked at two levels down – a new folder in Program
+//! Files, or a new folder inside a vendor's folder that was already there.
+//! Anything deeper inside an existing folder is left out, since other apps
+//! running at the same time write there too. Something only counts as new when
+//! it was also made after tracking started. A trace remembers what was inside
+//! each new folder, so a folder that later holds other things too is never
+//! removed whole.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -20,13 +23,17 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::error::{blocking, Error, Result};
-use crate::leftovers::{Found, Leftover};
+use crate::leftovers::{clean_name, clean_publisher, squash, Found, Leftover};
 use crate::paths::data_dir;
 use crate::quarantine::{settings_of, slug};
 use crate::settings::Settings;
 use crate::targets::{self, Guard, Target};
 use crate::util::{canonical, dir_stats, is_within, norm_path, now_secs, parallel_map, utc_date};
 use crate::{apps, log, AppState};
+
+/// Longer than this, and other apps have had too much time to add things:
+/// nothing is ticked for the user.
+const LONG_WINDOW_SECS: u64 = 3 * 3600;
 
 // ---------------------------------------------------------------------------
 // What's saved
@@ -42,13 +49,17 @@ pub struct TraceItem {
     kind: String,
     label: String,
     target: Target,
-    /// Made at the top of its place – a new folder in Program Files, a new key
-    /// under Software – rather than inside something that was already there.
+    /// Surely the installer's: made at the top of its place, or a service,
+    /// task or startup entry that runs a program it added.
     sure: bool,
     /// For a driver package: its Driver Store folder, which tells it apart
     /// from a later package Windows publishes under the same oem name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     store_folder: Option<String>,
+    /// For a folder or registry key: what was in it when the trace was saved
+    /// (lowercase names). Anything else in it later belongs to someone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -69,24 +80,46 @@ pub struct Trace {
     items: Vec<TraceItem>,
 }
 
-/// A snapshot taken before installing, kept on disk so tracking survives a
-/// restart of UWiper or of Windows.
-#[derive(Serialize, Deserialize, Debug)]
+/// About the tracking under way: small, read often.
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
-struct Pending {
+struct Info {
     started_at: u64,
-    /// The Windows user it was taken for: another user's AppData would all look new.
+    /// The Windows user it was started for: another user's AppData would all look new.
     user: String,
+    /// Started with administrator rights: without them, less can be read.
+    elevated: bool,
     installer: Option<String>,
+    /// Mixed into every hash of the snapshot.
+    salt: String,
+}
+
+/// The "before" snapshot: salted hashes only, for telling what's new.
+#[derive(Serialize, Deserialize, Default, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Snapshot {
     keys: BTreeSet<String>,
-    /// Installed apps and their versions.
+    /// The places that were looked at.
+    roots: BTreeSet<String>,
+    /// Installed apps (id → version).
     apps: BTreeMap<String, String>,
+    /// Installed apps by clean name and publisher, to tell an upgrade under a new id.
+    app_names: BTreeSet<String>,
+}
+
+/// Something to choose as the app a trace belongs to.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    id: String,
+    name: String,
 }
 
 /// What `finish_tracking` found, for the user to look over before saving.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Draft {
+    started_at: u64,
     name: String,
     app_id: Option<String>,
     publisher: Option<String>,
@@ -94,9 +127,16 @@ pub struct Draft {
     /// The app was already installed and this was an update.
     updated: bool,
     also_installed: Vec<String>,
+    /// Apps that were installed or changed meanwhile, to pick from.
+    candidates: Vec<Candidate>,
     /// False when scheduled tasks couldn't be read (without administrator rights).
     tasks_checked: bool,
+    /// Tracking ran so long that nothing is ticked.
+    long_window: bool,
     items: Vec<DraftItem>,
+    /// Its entry in installed apps, added on save when it's new.
+    #[serde(skip)]
+    app_item: Option<TraceItem>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -112,8 +152,11 @@ pub struct DraftItem {
 pub struct TrackingStatus {
     active: bool,
     started_at: Option<u64>,
+    /// Tracking was started with administrator rights.
+    elevated: bool,
     installer: Option<String>,
-    /// The installer UWiper started is still running.
+    /// UWiper started the installer and can see whether it's running.
+    installer_followed: bool,
     installer_running: bool,
 }
 
@@ -122,7 +165,7 @@ pub struct TrackingStatus {
 pub struct TraceView {
     #[serde(flatten)]
     trace: Trace,
-    /// Its app is still installed.
+    /// Its app (or an update of it) is still installed.
     installed: bool,
     /// For each item: it's still there.
     present: Vec<bool>,
@@ -140,8 +183,26 @@ struct Entry {
     parent: Option<String>,
     kind: &'static str,
     target: Target,
+    label: Option<String>,
     sure: bool,
+    /// The program a service, task or startup entry runs.
+    program: Option<String>,
     store_folder: Option<String>,
+}
+
+impl Entry {
+    fn new(key: String, parent: Option<String>, kind: &'static str, target: Target, sure: bool) -> Self {
+        Entry {
+            key,
+            parent,
+            kind,
+            target,
+            label: None,
+            sure,
+            program: None,
+            store_folder: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -150,42 +211,57 @@ struct AppInfo {
     name: String,
     publisher: Option<String>,
     version: Option<String>,
+    /// Its own folder: reported, or where its uninstaller is.
     location: Option<String>,
 }
 
-#[derive(Debug, Default)]
+impl AppInfo {
+    /// Clean name and publisher, which stay the same across upgrades.
+    fn identity(&self) -> String {
+        identity(&self.name, self.publisher.as_deref())
+    }
+}
+
+fn identity(name: &str, publisher: Option<&str>) -> String {
+    format!(
+        "{}|{}",
+        squash(&clean_name(name)),
+        squash(&clean_publisher(publisher.unwrap_or_default()))
+    )
+}
+
+#[derive(Clone, Debug, Default)]
 struct Look {
     entries: Vec<Entry>,
+    /// Names seen that aren't entries themselves (service keys that couldn't be opened).
+    seen: BTreeSet<String>,
     /// Places that couldn't be read (`x:` keys). Nothing in them counts as new
     /// later, since it may have been there all along.
     unreadable: BTreeSet<String>,
+    roots: BTreeSet<String>,
     apps: Vec<AppInfo>,
 }
 
-impl Look {
-    fn keys(&self) -> BTreeSet<String> {
-        self.entries
-            .iter()
-            .map(|e| e.key.clone())
-            .chain(self.unreadable.iter().cloned())
-            .collect()
-    }
-
-    fn app_versions(&self) -> BTreeMap<String, String> {
-        self.apps
-            .iter()
-            .map(|a| (a.id.clone(), a.version.clone().unwrap_or_default()))
-            .collect()
-    }
+/// How a place is looked at.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Mode {
+    /// Two levels down; new folders and shortcuts at the top are the installer's.
+    Normal,
+    /// Shared by design (Common Files): nothing is surely one app's.
+    Shared,
+    /// Two levels down, where only installers write (Start menu folders).
+    StartMenu,
+    /// Shortcuts only (Desktops): nothing else there is looked at.
+    Shortcuts,
+    /// New top-level folders only, never surely the installer's (the system drive).
+    DriveRoot,
+    /// Top-level folders whose names start with a dot (the user's profile).
+    DotFolders,
 }
 
-/// A place to look at, one or two levels down.
 struct Root {
     dir: String,
-    deep: bool,
-    /// Whatever appears inside its existing folders is the installer's too
-    /// (Start menu folders: apps don't write there while running).
-    sure_inside: bool,
+    mode: Mode,
 }
 
 fn env(var: &str) -> Option<String> {
@@ -194,39 +270,35 @@ fn env(var: &str) -> Option<String> {
 
 fn roots() -> Vec<Root> {
     let mut out = Vec::new();
-    let mut add = |dir: String, deep: bool, sure_inside: bool| out.push(Root { dir, deep, sure_inside });
+    let mut add = |dir: Option<String>, mode: Mode| {
+        if let Some(dir) = dir {
+            out.push(Root { dir, mode });
+        }
+    };
     for var in [
         "ProgramFiles",
         "ProgramFiles(x86)",
-        "CommonProgramFiles",
-        "CommonProgramFiles(x86)",
         "ProgramData",
         "APPDATA",
         "LOCALAPPDATA",
     ] {
-        if let Some(dir) = env(var) {
-            add(dir, true, false);
-        }
+        add(env(var), Mode::Normal);
     }
-    if let Some(local) = env("LOCALAPPDATA") {
-        add(format!(r"{local}\Programs"), true, false);
+    for var in ["CommonProgramFiles", "CommonProgramFiles(x86)"] {
+        add(env(var), Mode::Shared);
     }
-    if let Some(profile) = env("USERPROFILE") {
-        add(format!(r"{profile}\AppData\LocalLow"), true, false);
-        add(format!(r"{profile}\Desktop"), false, false);
-    }
-    // A Desktop that OneDrive keeps.
-    if let Some(onedrive) = env("OneDrive") {
-        add(format!(r"{onedrive}\Desktop"), false, false);
-    }
-    if let Some(public) = env("PUBLIC") {
-        add(format!(r"{public}\Desktop"), false, false);
-    }
-    for var in ["APPDATA", "ProgramData"] {
-        if let Some(dir) = env(var) {
-            add(format!(r"{dir}\Microsoft\Windows\Start Menu\Programs"), true, true);
-        }
-    }
+    add(env("LOCALAPPDATA").map(|l| format!(r"{l}\Programs")), Mode::Normal);
+    add(
+        env("USERPROFILE").map(|p| format!(r"{p}\AppData\LocalLow")),
+        Mode::Normal,
+    );
+    add(env("USERPROFILE"), Mode::DotFolders);
+    add(env("SystemDrive").map(|d| format!(r"{d}\")), Mode::DriveRoot);
+    let known = imp::known_folders();
+    add(known.desktop, Mode::Shortcuts);
+    add(known.public_desktop, Mode::Shortcuts);
+    add(known.programs, Mode::StartMenu);
+    add(known.common_programs, Mode::StartMenu);
     let mut seen = HashSet::new();
     out.retain(|r| seen.insert(canonical(&r.dir)));
     out
@@ -258,79 +330,126 @@ fn skip_name(name: &str) -> bool {
     lower.starts_with("microsoft") || lower.starts_with("windows") || NOISE.contains(&lower.as_str())
 }
 
+/// Folders Windows keeps at the root of the system drive.
+fn skip_drive_name(name: &str) -> bool {
+    const SYSTEM: [&str; 9] = [
+        "program files",
+        "program files (x86)",
+        "programdata",
+        "users",
+        "perflogs",
+        "recovery",
+        "msocache",
+        "onedrivetemp",
+        "system volume information",
+    ];
+    let lower = name.to_lowercase();
+    lower.starts_with('$') || lower.starts_with("windows") || SYSTEM.contains(&lower.as_str())
+}
+
+fn is_shortcut(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("lnk") || e.eq_ignore_ascii_case("url"))
+}
+
 fn path_kind(path: &Path, is_dir: bool) -> &'static str {
     if is_dir {
         "folder"
-    } else if path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("lnk") || e.eq_ignore_ascii_case("url"))
-    {
+    } else if is_shortcut(path) {
         "shortcut"
     } else {
         "file"
     }
 }
 
+/// A path with a part named like Microsoft's or Windows' own (Edge, Defender…).
+fn microsoft_path(path: &str) -> bool {
+    norm_path(path)
+        .split('\\')
+        .skip(1)
+        .any(|part| part.starts_with("microsoft") || part.starts_with("windows"))
+}
+
 /// Files and folders one or two levels down in every place.
 fn look_files(look: &mut Look, own: &[String]) {
     let roots = roots();
     let root_dirs: Vec<String> = roots.iter().map(|r| canonical(&r.dir)).collect();
+    let mine = |text: &str| own.iter().any(|o| is_within(o, text) || is_within(text, o));
     for root in &roots {
         let root_key = format!("f:{}", norm_path(&root.dir));
-        let Ok(children) = std::fs::read_dir(&root.dir) else {
-            look.unreadable.insert(format!("x:{root_key}"));
-            continue;
+        look.roots.insert(root_key.clone());
+        let children = match std::fs::read_dir(&root.dir) {
+            Ok(c) => c,
+            // Not there yet: the installer may well make it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                look.unreadable.insert(format!("x:{root_key}"));
+                continue;
+            }
         };
         for child in children.flatten() {
             let Ok(file_type) = child.file_type() else { continue };
             let name = child.file_name().to_string_lossy().into_owned();
             let path = child.path();
             let text = path.to_string_lossy().into_owned();
+            let is_dir = file_type.is_dir();
             // Links lead elsewhere; places of their own are looked at on their own.
-            if file_type.is_symlink() || skip_name(&name) || root_dirs.contains(&canonical(&text)) {
+            if file_type.is_symlink() || skip_name(&name) || root_dirs.contains(&canonical(&text)) || mine(&text) {
                 continue;
             }
-            if own.iter().any(|o| is_within(o, &text) || is_within(&text, o)) {
+            let wanted = match root.mode {
+                Mode::Shortcuts => !is_dir && is_shortcut(&path),
+                Mode::DriveRoot => is_dir && !skip_drive_name(&name),
+                Mode::DotFolders => is_dir && name.starts_with('.'),
+                _ => true,
+            };
+            if !wanted {
                 continue;
             }
+            let kind = path_kind(&path, is_dir);
+            // New folders and shortcuts are an installer's doing; a loose new
+            // file may well be someone else's.
+            let sure = match root.mode {
+                Mode::Normal | Mode::StartMenu => kind != "file",
+                Mode::Shortcuts => true,
+                Mode::Shared | Mode::DriveRoot | Mode::DotFolders => false,
+            };
             let key = format!("f:{}", norm_path(&text));
-            let kind = path_kind(&path, file_type.is_dir());
-            look.entries.push(Entry {
-                key: key.clone(),
-                parent: Some(root_key.clone()),
+            look.entries.push(Entry::new(
+                key.clone(),
+                Some(root_key.clone()),
                 kind,
-                target: Target::Path { path: text.clone() },
-                // New folders and shortcuts are an installer's doing; a loose
-                // new file (on the Desktop, say) may well be someone else's.
-                sure: kind != "file",
-                store_folder: None,
-            });
-            if !root.deep || !file_type.is_dir() {
+                Target::Path { path: text.clone() },
+                sure,
+            ));
+            let deep = matches!(root.mode, Mode::Normal | Mode::Shared | Mode::StartMenu);
+            if !deep || !is_dir {
                 continue;
             }
-            let Ok(inner) = std::fs::read_dir(&path) else {
-                look.unreadable.insert(format!("x:{key}"));
-                continue;
+            let inner = match std::fs::read_dir(&path) {
+                Ok(i) => i,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    look.unreadable.insert(format!("x:{key}"));
+                    continue;
+                }
             };
             for item in inner.flatten() {
                 let Ok(item_type) = item.file_type() else { continue };
                 let item_name = item.file_name().to_string_lossy().into_owned();
-                if item_type.is_symlink() || skip_name(&item_name) {
-                    continue;
-                }
                 let item_path = item.path();
                 let item_text = item_path.to_string_lossy().into_owned();
-                if own.iter().any(|o| is_within(o, &item_text) || is_within(&item_text, o)) {
+                if item_type.is_symlink() || skip_name(&item_name) || mine(&item_text) {
                     continue;
                 }
-                look.entries.push(Entry {
-                    key: format!("f:{}", norm_path(&item_text)),
-                    parent: Some(key.clone()),
-                    kind: path_kind(&item_path, item_type.is_dir()),
-                    target: Target::Path { path: item_text },
-                    sure: root.sure_inside,
-                    store_folder: None,
-                });
+                let item_kind = path_kind(&item_path, item_type.is_dir());
+                look.entries.push(Entry::new(
+                    format!("f:{}", norm_path(&item_text)),
+                    Some(key.clone()),
+                    item_kind,
+                    Target::Path { path: item_text },
+                    root.mode == Mode::StartMenu && item_kind != "file",
+                ));
             }
         }
     }
@@ -338,34 +457,33 @@ fn look_files(look: &mut Look, own: &[String]) {
 
 /// Services, scheduled tasks, Run entries, PATH, driver packages and installed apps.
 fn look_lists(look: &mut Look) {
-    match crate::services::list() {
-        Ok(services) => {
-            for s in services.into_iter().filter(|s| !s.is_windows) {
-                look.entries.push(Entry {
-                    key: format!("s:{}", s.name.to_lowercase()),
-                    parent: None,
-                    kind: "service",
-                    target: s.removal,
-                    sure: true,
-                    store_folder: None,
-                });
-            }
-        }
-        Err(_) => {
+    // Every service name counts as seen, also the ones whose key can't be
+    // opened: they mustn't look new once it can.
+    match imp::service_names() {
+        Some(names) => look
+            .seen
+            .extend(names.into_iter().map(|n| format!("s:{}", n.to_lowercase()))),
+        None => {
             look.unreadable.insert("x:services".into());
         }
     }
+    for s in crate::services::list().unwrap_or_default() {
+        if s.is_windows || s.binary.as_deref().is_some_and(microsoft_path) {
+            continue;
+        }
+        let mut entry = Entry::new(format!("s:{}", s.name.to_lowercase()), None, "service", s.removal, true);
+        entry.program = s.binary;
+        look.entries.push(entry);
+    }
     match crate::tasks::list() {
         Ok(tasks) => {
-            for t in tasks.into_iter().filter(|t| !t.is_windows) {
-                look.entries.push(Entry {
-                    key: format!("t:{}", t.name.to_lowercase()),
-                    parent: None,
-                    kind: "task",
-                    target: t.removal,
-                    sure: true,
-                    store_folder: None,
-                });
+            for t in tasks {
+                if t.is_windows || t.binary.as_deref().is_some_and(microsoft_path) {
+                    continue;
+                }
+                let mut entry = Entry::new(format!("t:{}", t.name.to_lowercase()), None, "task", t.removal, true);
+                entry.program = t.binary;
+                look.entries.push(entry);
             }
         }
         Err(_) => {
@@ -374,56 +492,79 @@ fn look_lists(look: &mut Look) {
     }
     // Startup folder shortcuts are files in the Start menu, already looked at.
     for s in crate::startup::list().unwrap_or_default() {
-        if let Target::RegistryValue { key, name } = &s.removal {
-            if s.is_windows {
-                continue;
-            }
-            look.entries.push(Entry {
-                key: format!("r:{}|{}", key.to_lowercase(), name.to_lowercase()),
-                parent: None,
-                kind: "startup",
-                target: s.removal.clone(),
-                sure: true,
-                store_folder: None,
-            });
+        let Target::RegistryValue { key, name } = &s.removal else {
+            continue;
+        };
+        if s.is_windows || s.target.as_deref().is_some_and(microsoft_path) {
+            continue;
         }
+        let mut entry = Entry::new(
+            format!("r:{}|{}", key.to_lowercase(), name.to_lowercase()),
+            None,
+            "startup",
+            s.removal.clone(),
+            true,
+        );
+        entry.program = s.target.clone();
+        look.entries.push(entry);
     }
     for (scope, entry) in crate::orphans::path_entries() {
-        look.entries.push(Entry {
-            key: format!("p:{scope}|{}", norm_path(&entry)),
-            parent: None,
-            kind: "environment",
-            target: Target::PathEntry {
+        look.entries.push(Entry::new(
+            format!("p:{scope}|{}", norm_path(&entry)),
+            None,
+            "environment",
+            Target::PathEntry {
                 scope: scope.into(),
                 entry,
             },
-            sure: true,
-            store_folder: None,
-        });
+            true,
+        ));
     }
+    for (key, name) in imp::environment_values() {
+        look.entries.push(Entry::new(
+            format!("v:{}|{}", key.to_lowercase(), name.to_lowercase()),
+            None,
+            "environment",
+            Target::RegistryValue { key, name },
+            false,
+        ));
+    }
+    // By published name only: a package updated under the same name isn't new.
     for (inf, folder) in imp::driver_packages() {
-        look.entries.push(Entry {
-            key: format!(
-                "d:{}|{}",
-                inf.to_lowercase(),
-                folder.as_deref().unwrap_or_default().to_lowercase()
-            ),
-            parent: None,
-            kind: "driver",
-            target: Target::Driver { inf },
-            sure: true,
-            store_folder: folder,
+        let original = folder.as_deref().and_then(|f| {
+            f.to_lowercase()
+                .find(".inf_")
+                .and_then(|end| f.get(..end + 4))
+                .map(str::to_string)
         });
+        let mut entry = Entry::new(
+            format!("d:{}", inf.to_lowercase()),
+            None,
+            "driver",
+            Target::Driver { inf: inf.clone() },
+            false,
+        );
+        entry.label = Some(match original {
+            Some(o) => format!("Driver package {inf} ({o})"),
+            None => format!("Driver package {inf}"),
+        });
+        entry.store_folder = folder;
+        look.entries.push(entry);
     }
+    let shared = apps::shared_folders();
     look.apps = apps::list_plain()
         .unwrap_or_default()
         .into_iter()
         .map(|a| AppInfo {
+            location: a
+                .install_location
+                .clone()
+                .or_else(|| apps::location_from_uninstaller(a.uninstall_string.as_deref(), &shared))
+                .filter(|l| apps::is_own_folder(l, &shared)),
             id: a.id,
             name: a.name,
             publisher: a.publisher,
             version: a.version,
-            location: a.install_location,
         })
         .collect();
 }
@@ -437,16 +578,57 @@ fn look(settings: &Settings) -> Look {
     look
 }
 
+/// A salted hash, so the snapshot on disk doesn't list what's on the PC.
+fn hash(salt: &str, text: &str) -> String {
+    // FNV-1a: the same in every build, unlike std's hasher.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in salt.bytes().chain([0]).chain(text.bytes()) {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+fn snapshot(look: &Look, salt: &str) -> Snapshot {
+    let h = |text: &str| hash(salt, text);
+    Snapshot {
+        keys: look
+            .entries
+            .iter()
+            .map(|e| h(&e.key))
+            .chain(look.seen.iter().map(|k| h(k)))
+            .chain(look.unreadable.iter().map(|k| h(k)))
+            .collect(),
+        roots: look.roots.iter().map(|r| h(r)).collect(),
+        apps: look
+            .apps
+            .iter()
+            .map(|a| (h(&a.id), h(a.version.as_deref().unwrap_or_default())))
+            .collect(),
+        app_names: look.apps.iter().map(|a| h(&a.identity())).collect(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Comparing
 
 /// What's new since the snapshot: the topmost new things, nothing inside a
-/// place that couldn't be read before.
-fn new_entries(before: &BTreeSet<String>, after: &Look) -> Vec<Entry> {
+/// place that couldn't be read or wasn't looked at before, and only what was
+/// made after tracking started.
+fn new_entries(before: &Snapshot, salt: &str, after: &Look, made_since: &dyn Fn(&Entry) -> bool) -> Vec<Entry> {
+    let had = |key: &str| before.keys.contains(&hash(salt, key));
+    // Places that weren't looked at before (a Desktop OneDrive took over, say)
+    // count as unreadable then.
+    let unlooked: HashSet<&str> = after
+        .roots
+        .iter()
+        .filter(|r| !before.roots.contains(&hash(salt, r)))
+        .map(String::as_str)
+        .collect();
     let fresh: HashSet<&str> = after
         .entries
         .iter()
-        .filter(|e| !before.contains(&e.key))
+        .filter(|e| !had(&e.key))
         .map(|e| e.key.as_str())
         .collect();
     after
@@ -455,14 +637,15 @@ fn new_entries(before: &BTreeSet<String>, after: &Look) -> Vec<Entry> {
         .filter(|e| fresh.contains(e.key.as_str()))
         .filter(|e| match &e.parent {
             // A new folder already covers what's in it.
-            Some(p) => !fresh.contains(p.as_str()) && !before.contains(&format!("x:{p}")),
+            Some(p) => !fresh.contains(p.as_str()) && !had(&format!("x:{p}")) && !unlooked.contains(p.as_str()),
             None => true,
         })
         .filter(|e| match e.kind {
-            "service" => !before.contains("x:services"),
-            "task" => !before.contains("x:tasks"),
+            "service" => !had("x:services"),
+            "task" => !had("x:tasks"),
             _ => true,
         })
+        .filter(|e| made_since(e))
         .cloned()
         .collect()
 }
@@ -473,34 +656,60 @@ fn is_microsoft(app: &AppInfo) -> bool {
         .is_some_and(|p| p.to_lowercase().starts_with("microsoft"))
 }
 
-/// The app this install was for, and the others that came along with it
-/// (runtimes and the like). The main one isn't Microsoft's and has the most
-/// new files in its folder.
-fn choose_app(new_apps: Vec<AppInfo>, items: &[Entry]) -> (Option<AppInfo>, Vec<AppInfo>) {
-    let inside = |app: &AppInfo| {
-        let Some(dir) = app.location.as_deref().map(canonical).filter(|d| !d.is_empty()) else {
-            return 0;
-        };
-        items
-            .iter()
-            .filter(|e| matches!(&e.target, Target::Path { path } if is_within(&canonical(path), &dir)))
-            .count()
+fn inside(dir: Option<&str>, path: &str) -> bool {
+    dir.map(canonical)
+        .filter(|d| !d.is_empty())
+        .is_some_and(|d| is_within(&canonical(path), &d))
+}
+
+/// How many new files and folders lie in an app's folder.
+fn evidence(app: &AppInfo, items: &[Entry]) -> usize {
+    items
+        .iter()
+        .filter(|e| matches!(&e.target, Target::Path { path } if inside(app.location.as_deref(), path)))
+        .count()
+}
+
+/// Ranks apps for "which app was this install for": not Microsoft's, the most
+/// new files in its folder, then by name.
+fn rank(mut apps: Vec<AppInfo>, items: &[Entry]) -> Vec<AppInfo> {
+    apps.sort_by_cached_key(|a| {
+        (
+            is_microsoft(a),
+            std::cmp::Reverse(evidence(a, items)),
+            a.name.to_lowercase(),
+        )
+    });
+    apps
+}
+
+/// Which apps changed while tracking.
+struct Changes {
+    /// Installed for the first time.
+    fresh: Vec<AppInfo>,
+    /// Installed under a new id, but the same app as before (an MSI upgrade, say).
+    upgraded: Vec<AppInfo>,
+    /// Same id, new version.
+    updated: Vec<AppInfo>,
+}
+
+fn changes(before: &Snapshot, salt: &str, after: &Look) -> Changes {
+    let mut out = Changes {
+        fresh: Vec::new(),
+        upgraded: Vec::new(),
+        updated: Vec::new(),
     };
-    let mut ranked: Vec<(bool, std::cmp::Reverse<usize>, String, AppInfo)> = new_apps
-        .into_iter()
-        .map(|a| {
-            (
-                is_microsoft(&a),
-                std::cmp::Reverse(inside(&a)),
-                a.name.to_lowercase(),
-                a,
-            )
-        })
-        .collect();
-    ranked.sort_by(|a, b| (a.0, a.1, &a.2).cmp(&(b.0, b.1, &b.2)));
-    let mut apps = ranked.into_iter().map(|r| r.3);
-    let main = apps.next();
-    (main, apps.collect())
+    for app in &after.apps {
+        match before.apps.get(&hash(salt, &app.id)) {
+            None if before.app_names.contains(&hash(salt, &app.identity())) => out.upgraded.push(app.clone()),
+            None => out.fresh.push(app.clone()),
+            Some(version) if *version != hash(salt, app.version.as_deref().unwrap_or_default()) => {
+                out.updated.push(app.clone())
+            }
+            Some(_) => {}
+        }
+    }
+    out
 }
 
 fn installer_name(installer: Option<&str>) -> Option<String> {
@@ -509,96 +718,149 @@ fn installer_name(installer: Option<&str>) -> Option<String> {
         .map(|n| n.to_string_lossy().into_owned())
 }
 
-/// Turns the difference between two looks into what the user reviews.
-fn draft(pending: &Pending, after: &Look, guard: &Guard) -> Draft {
-    let mut items = new_entries(&pending.keys, after);
-    let new_apps: Vec<AppInfo> = after
-        .apps
+/// Turns what's new into what the user reviews, for the app chosen (or the
+/// likeliest one when `choice` is None; `Some(None)` is "no app").
+fn draft(
+    info: &Info,
+    before: &Snapshot,
+    after: &Look,
+    new: &[Entry],
+    guard: &Guard,
+    choice: Option<Option<&str>>,
+) -> Draft {
+    let changed = changes(before, &info.salt, after);
+    // Apps changed by an update only count with new files in their folder:
+    // Chrome updating itself in the background isn't what was installed.
+    let ranked_fresh = rank(changed.fresh.clone(), new);
+    let ranked_other: Vec<AppInfo> = rank(changed.upgraded.iter().chain(&changed.updated).cloned().collect(), new)
+        .into_iter()
+        .filter(|a| evidence(a, new) > 0)
+        .collect();
+    let candidates: Vec<AppInfo> = ranked_fresh.iter().chain(&ranked_other).cloned().collect();
+    let main: Option<AppInfo> = match choice {
+        Some(None) => None,
+        Some(Some(id)) => after.apps.iter().find(|a| a.id == id).cloned(),
+        None => candidates.first().cloned(),
+    };
+    let main_id = main.as_ref().map(|a| a.id.clone());
+    let also: Vec<AppInfo> = changed
+        .fresh
         .iter()
-        .filter(|a| !pending.apps.contains_key(&a.id))
+        .filter(|a| Some(&a.id) != main_id.as_ref())
         .cloned()
         .collect();
-    let updated: Option<AppInfo> = after
+    // Every other installed app's folder: what's in there is that app's.
+    let other_dirs: Vec<String> = after
         .apps
         .iter()
-        .find(|a| {
-            pending
-                .apps
-                .get(&a.id)
-                .is_some_and(|v| *v != a.version.clone().unwrap_or_default())
-        })
-        .cloned();
-    let (main, also) = choose_app(new_apps, &items);
-
-    // What belongs to the apps that came along stays theirs.
-    let also_dirs: Vec<String> = also
-        .iter()
+        .filter(|a| Some(&a.id) != main_id.as_ref())
         .filter_map(|a| a.location.as_deref().map(canonical))
-        .filter(|d| !d.is_empty() && guard.check(&Target::Path { path: d.clone() }).is_ok())
+        .filter(|d| !d.is_empty())
         .collect();
-    items.retain(|e| match &e.target {
-        Target::Path { path } => !also_dirs.iter().any(|d| is_within(&canonical(path), d)),
-        _ => true,
-    });
-    if let Some(key) = main.as_ref().and_then(|a| apps::uninstall_key_path(&a.id)) {
-        items.push(Entry {
-            key: format!("a:{}", key.to_lowercase()),
-            parent: None,
-            kind: "app",
-            target: Target::RegistryKey { key },
-            sure: true,
-            store_folder: None,
-        });
-    }
-    items.retain(|e| guard.check(&e.target).is_ok());
+    let new_dirs: Vec<String> = new
+        .iter()
+        .filter(|e| e.kind == "folder")
+        .filter_map(|e| match &e.target {
+            Target::Path { path } => Some(canonical(path)),
+            _ => None,
+        })
+        .collect();
+    let main_dir = main.as_ref().and_then(|a| a.location.as_deref()).map(canonical);
+    let long_window = now_secs().saturating_sub(info.started_at) > LONG_WINDOW_SECS;
+
+    let mut items: Vec<Entry> = new
+        .iter()
+        .filter(|e| match &e.target {
+            Target::Path { path } => !other_dirs.iter().any(|d| is_within(&canonical(path), d)),
+            _ => true,
+        })
+        .cloned()
+        .map(|mut e| {
+            // A service, task or startup entry is surely the installer's when
+            // it runs something the installer added, and never when it runs
+            // something of an app that came along.
+            if let Some(program) = e.program.as_deref().map(canonical) {
+                let in_also = also.iter().any(|a| inside(a.location.as_deref(), &program));
+                e.sure = !in_also
+                    && (new_dirs.iter().any(|d| is_within(&program, d))
+                        || main_dir
+                            .as_deref()
+                            .is_some_and(|d| !d.is_empty() && is_within(&program, d)));
+            }
+            if long_window {
+                e.sure = false;
+            }
+            e
+        })
+        .filter(|e| guard.check(&e.target).is_ok())
+        .collect();
+    items.sort_by(|a, b| (!a.sure, a.kind, a.key.as_str()).cmp(&(!b.sure, b.kind, b.key.as_str())));
 
     let sizes = parallel_map(&items, |e| match &e.target {
         Target::Path { path } => Some(dir_stats(Path::new(path)).0),
         _ => None,
     });
-    let mut out: Vec<DraftItem> = items
+    let out: Vec<DraftItem> = items
         .into_iter()
         .zip(sizes)
         .map(|(e, size_bytes)| DraftItem {
             item: TraceItem {
-                label: targets::describe(&e.target),
+                label: e.label.clone().unwrap_or_else(|| targets::describe(&e.target)),
                 id: e.key,
                 kind: e.kind.into(),
                 target: e.target,
                 sure: e.sure,
                 store_folder: e.store_folder,
+                children: None,
             },
             size_bytes,
         })
         .collect();
-    out.sort_by(|a, b| {
-        (!a.item.sure, &a.item.kind, a.item.label.to_lowercase()).cmp(&(
-            !b.item.sure,
-            &b.item.kind,
-            b.item.label.to_lowercase(),
-        ))
-    });
 
-    let app = main.clone().or_else(|| updated.clone());
+    // Its entry in installed apps, when that's new.
+    let app_item = main
+        .as_ref()
+        .filter(|a| !before.apps.contains_key(&hash(&info.salt, &a.id)))
+        .and_then(|a| apps::uninstall_key_path(&a.id))
+        .map(|key| TraceItem {
+            id: format!("a:{}", key.to_lowercase()),
+            kind: "app".into(),
+            label: key.clone(),
+            target: Target::RegistryKey { key },
+            sure: true,
+            store_folder: None,
+            children: None,
+        })
+        .filter(|item| guard.check(&item.target).is_ok());
+
     Draft {
-        name: app
+        started_at: info.started_at,
+        name: main
             .as_ref()
             .map(|a| a.name.clone())
             .or_else(|| {
-                installer_name(pending.installer.as_deref()).map(|n| {
+                installer_name(info.installer.as_deref()).map(|n| {
                     Path::new(&n)
                         .file_stem()
                         .map_or(n.clone(), |s| s.to_string_lossy().into_owned())
                 })
             })
-            .unwrap_or_else(|| format!("Install of {}", utc_date(pending.started_at))),
-        app_id: app.as_ref().map(|a| a.id.clone()),
-        publisher: app.as_ref().and_then(|a| a.publisher.clone()),
-        version: app.as_ref().and_then(|a| a.version.clone()),
-        updated: main.is_none() && updated.is_some(),
+            .unwrap_or_else(|| format!("Install of {}", utc_date(info.started_at))),
+        app_id: main_id,
+        publisher: main.as_ref().and_then(|a| a.publisher.clone()),
+        version: main.as_ref().and_then(|a| a.version.clone()),
+        updated: main
+            .as_ref()
+            .is_some_and(|a| !changed.fresh.iter().any(|f| f.id == a.id)),
         also_installed: also.into_iter().map(|a| a.name).collect(),
-        tasks_checked: !pending.keys.contains("x:tasks") && !after.unreadable.contains("x:tasks"),
+        candidates: candidates
+            .into_iter()
+            .map(|a| Candidate { id: a.id, name: a.name })
+            .collect(),
+        tasks_checked: !before.keys.contains(&hash(&info.salt, "x:tasks")) && !after.unreadable.contains("x:tasks"),
+        long_window,
         items: out,
+        app_item,
     }
 }
 
@@ -609,8 +871,12 @@ fn dir(settings: &Settings) -> PathBuf {
     data_dir(settings, "snapshots")
 }
 
-fn pending_file(settings: &Settings) -> PathBuf {
-    dir(settings).join("pending.json")
+fn info_file(settings: &Settings) -> PathBuf {
+    dir(settings).join("tracking.json")
+}
+
+fn snapshot_file(settings: &Settings) -> PathBuf {
+    dir(settings).join("snapshot.json")
 }
 
 fn traces_dir(settings: &Settings) -> PathBuf {
@@ -622,19 +888,52 @@ fn write_json<T: Serialize>(file: &Path, value: &T) -> Result<()> {
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(value).map_err(|e| Error::Other(e.to_string()))?;
+    let json = serde_json::to_string(value).map_err(|e| Error::Other(e.to_string()))?;
     let temp = file.with_extension("json.new");
     std::fs::write(&temp, json)?;
     std::fs::rename(&temp, file)?;
     Ok(())
 }
 
-fn read_pending(settings: &Settings) -> Option<Pending> {
-    serde_json::from_str(&std::fs::read_to_string(pending_file(settings)).ok()?).ok()
+fn read_json<T: for<'de> Deserialize<'de>>(file: &Path) -> Option<T> {
+    serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
+}
+
+fn read_info(settings: &Settings) -> Option<Info> {
+    read_json(&info_file(settings))
+}
+
+fn clear(settings: &Settings) {
+    let _ = std::fs::remove_file(info_file(settings));
+    let _ = std::fs::remove_file(snapshot_file(settings));
+    let mut s = session();
+    s.installer = None;
+    s.draft = None;
+    s.after = None;
 }
 
 fn current_user() -> String {
     env("USERPROFILE").map(|p| canonical(&p)).unwrap_or_default()
+}
+
+/// Trace ids are what `save_trace` makes: digits, a dash, lowercase letters,
+/// digits and dashes. Nothing that could name another file or a device.
+fn valid_id(id: &str) -> bool {
+    let Some((time, rest)) = id.split_once('-') else {
+        return false;
+    };
+    !time.is_empty()
+        && time.bytes().all(|b| b.is_ascii_digit())
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn trace_file(settings: &Settings, id: &str) -> Result<PathBuf> {
+    if !valid_id(id) {
+        return Err(Error::Other("Unknown trace".into()));
+    }
+    Ok(traces_dir(settings).join(format!("{id}.json")))
 }
 
 pub fn list(settings: &Settings) -> Vec<Trace> {
@@ -642,30 +941,54 @@ pub fn list(settings: &Settings) -> Vec<Trace> {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-                .filter_map(|e| serde_json::from_str(&std::fs::read_to_string(e.path()).ok()?).ok())
+                .filter_map(|e| {
+                    let stem = e.file_name().to_string_lossy().strip_suffix(".json")?.to_string();
+                    let trace: Trace = read_json(&e.path())?;
+                    (valid_id(&stem) && trace.id == stem).then_some(trace)
+                })
                 .collect()
         })
         .unwrap_or_default();
-    traces.sort_by_key(|t: &Trace| std::cmp::Reverse(t.finished_at));
+    traces.sort_by_key(|t| std::cmp::Reverse(t.finished_at));
     traces
 }
 
-fn trace_file(settings: &Settings, id: &str) -> Result<PathBuf> {
-    if id.is_empty() || id.contains(['/', '\\', ':', '.']) {
-        return Err(Error::Other("Unknown trace".into()));
-    }
-    Ok(traces_dir(settings).join(format!("{id}.json")))
-}
-
 fn load(settings: &Settings, id: &str) -> Result<Trace> {
-    let text =
-        std::fs::read_to_string(trace_file(settings, id)?).map_err(|_| Error::Other("This trace is gone".into()))?;
-    serde_json::from_str(&text).map_err(|_| Error::Other("This trace can't be read".into()))
+    let trace: Trace = read_json(&trace_file(settings, id)?).ok_or(Error::Other("This trace is gone".into()))?;
+    if trace.id != id {
+        return Err(Error::Other("This trace can't be read".into()));
+    }
+    Ok(trace)
 }
 
 // ---------------------------------------------------------------------------
 // Using a trace later
+
+/// An installed app, as far as matching it to a trace goes.
+pub(crate) struct AppLike<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub publisher: Option<&'a str>,
+    pub location: Option<&'a str>,
+}
+
+/// Whether an installed app is the one a trace belongs to – also after an
+/// upgrade gave it a new id.
+fn belongs(trace: &Trace, present: &[bool], app: &AppLike) -> bool {
+    let Some(app_id) = trace.app_id.as_deref() else {
+        return false;
+    };
+    if app_id == app.id || identity(&trace.name, trace.publisher.as_deref()) == identity(app.name, app.publisher) {
+        return true;
+    }
+    // Its folder is one the install made.
+    app.location.is_some_and(|location| {
+        trace.items.iter().zip(present).any(|(item, &here)| {
+            here && item.kind == "folder"
+                && matches!(&item.target, Target::Path { path } if inside(Some(path), location))
+        })
+    })
+}
 
 /// Whether something from a trace is still there – and still the same thing.
 fn present(item: &TraceItem) -> bool {
@@ -674,12 +997,34 @@ fn present(item: &TraceItem) -> bool {
         Target::PathEntry { scope, entry } => crate::orphans::path_entries()
             .iter()
             .any(|(s, e)| *s == scope.as_str() && norm_path(e) == norm_path(entry)),
-        Target::Driver { inf } => imp::driver_packages().iter().any(|(i, folder)| {
-            i.eq_ignore_ascii_case(inf)
-                && (item.store_folder.is_none()
-                    || folder.as_deref().map(str::to_lowercase) == item.store_folder.as_deref().map(str::to_lowercase))
+        // Windows reuses oem numbers: only the same Driver Store folder is the same package.
+        Target::Driver { inf } => item.store_folder.as_deref().is_some_and(|folder| {
+            imp::driver_packages().iter().any(|(i, f)| {
+                i.eq_ignore_ascii_case(inf) && f.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(folder))
+            })
         }),
         target => imp::exists(target),
+    }
+}
+
+/// What's in a folder or registry key now, lowercase.
+fn children_of(target: &Target) -> Option<Vec<String>> {
+    match target {
+        Target::Path { path } => {
+            let entries = std::fs::read_dir(path).ok()?;
+            let mut names: Vec<String> = entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_lowercase())
+                .collect();
+            names.sort();
+            Some(names)
+        }
+        Target::RegistryKey { key } => imp::subkeys(key).map(|mut names| {
+            names.iter_mut().for_each(|n| *n = n.to_lowercase());
+            names.sort();
+            names
+        }),
+        _ => None,
     }
 }
 
@@ -698,65 +1043,117 @@ fn leftover_kind(kind: &str) -> &'static str {
     }
 }
 
-/// Adds what a trace recorded and is still there to a leftover scan.
-pub(crate) fn add_to(found: &mut Found, trace: &Trace) {
+/// Adds what a trace recorded and is still there to a leftover scan. Nothing
+/// inside another installed app's folder; a folder or key that holds things
+/// the install didn't make only offers what it did make.
+pub(crate) fn add_to(found: &mut Found, trace: &Trace, other_folders: &[String]) {
     let date = utc_date(trace.finished_at);
+    let elsewhere = |path: &str| other_folders.iter().any(|o| is_within(&canonical(path), o));
     for item in trace.items.iter().filter(|i| present(i)) {
-        let (reason, confidence) = if item.sure {
-            (format!("Added when it was installed – tracked {date}"), "high")
+        if matches!(&item.target, Target::Path { path } if elsewhere(path)) {
+            continue;
+        }
+        let confidence = if item.sure { "high" } else { "medium" };
+        let reason = if item.sure {
+            format!("Added when it was installed – tracked {date}")
         } else {
-            (
-                format!("Added inside a folder that was already there while it was installed – tracked {date}"),
-                "medium",
-            )
+            format!("Added inside a folder that was already there while it was installed – tracked {date}")
         };
-        found.add(leftover_kind(&item.kind), item.target.clone(), &reason, confidence);
+        let added_since: Vec<String> = match (&item.children, children_of(&item.target)) {
+            (Some(then), Some(now)) => now.into_iter().filter(|n| !then.contains(n)).collect(),
+            _ => Vec::new(),
+        };
+        if added_since.is_empty() {
+            found.add(leftover_kind(&item.kind), item.target.clone(), &reason, confidence);
+            continue;
+        }
+        // Shared since: only what was in it when the app was installed.
+        let reason =
+            format!("Added when it was installed, in a place that now holds other things too – tracked {date}");
+        for child in item.children.iter().flatten() {
+            match &item.target {
+                Target::Path { path } => {
+                    let child_path = Path::new(path).join(child);
+                    if std::fs::symlink_metadata(&child_path).is_ok() {
+                        found.add_path(&child_path, &reason, confidence);
+                    }
+                }
+                Target::RegistryKey { key } => {
+                    let child_key = Target::RegistryKey {
+                        key: format!(r"{key}\{child}"),
+                    };
+                    if imp::exists(&child_key) {
+                        found.add("registry", child_key, &reason, confidence);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
-/// Traces of an installed app, for its leftover scan.
-pub(crate) fn traces_for(settings: &Settings, app_id: &str) -> Vec<Trace> {
+/// Traces that belong to an installed app, for its leftover scan.
+pub(crate) fn traces_for(settings: &Settings, app: &AppLike) -> Vec<Trace> {
     list(settings)
         .into_iter()
-        .filter(|t| t.app_id.as_deref() == Some(app_id))
+        .filter(|t| {
+            let present: Vec<bool> = t.items.iter().map(present).collect();
+            belongs(t, &present, app)
+        })
         .collect()
+}
+
+/// Installed apps' own folders, except those of the apps a trace belongs to.
+fn other_folders(trace: &Trace, present: &[bool], installed: &[apps::InstalledApp]) -> (Vec<String>, bool) {
+    let shared = apps::shared_folders();
+    let mut still_installed = false;
+    let mut out = Vec::new();
+    for a in installed {
+        let location = a
+            .install_location
+            .clone()
+            .or_else(|| apps::location_from_uninstaller(a.uninstall_string.as_deref(), &shared))
+            .filter(|l| apps::is_own_folder(l, &shared));
+        let like = AppLike {
+            id: &a.id,
+            name: &a.name,
+            publisher: a.publisher.as_deref(),
+            location: location.as_deref(),
+        };
+        if belongs(trace, present, &like) {
+            still_installed = true;
+        } else if let Some(l) = location {
+            out.push(canonical(&l));
+        }
+    }
+    (out, still_installed)
 }
 
 /// What a trace recorded and is still there, ready to review and remove.
 fn leftovers_of(settings: &Settings, trace: &Trace) -> Result<Vec<Leftover>> {
     let installed = apps::list_plain()?;
-    let still_installed = trace
-        .app_id
-        .as_deref()
-        .is_some_and(|id| installed.iter().any(|a| a.id == id));
-    let shared = apps::shared_folders();
-    let other_folders: Vec<String> = installed
-        .iter()
-        .filter(|a| Some(a.id.as_str()) != trace.app_id.as_deref())
-        .filter_map(|a| {
-            a.install_location
-                .clone()
-                .or_else(|| apps::location_from_uninstaller(a.uninstall_string.as_deref(), &shared))
-        })
-        .map(|p| canonical(&p))
-        .filter(|p| !p.is_empty() && apps::is_own_folder(p, &shared))
-        .collect();
-    let mut found = Found::new(Guard::new(settings), other_folders, still_installed);
-    add_to(&mut found, trace);
+    let present: Vec<bool> = trace.items.iter().map(present).collect();
+    let (others, still_installed) = other_folders(trace, &present, &installed);
+    // With no app to tell by, the install may still be in use: nothing is certain.
+    let unsure = still_installed || trace.app_id.is_none();
+    let mut found = Found::new(Guard::new(settings), others.clone(), unsure);
+    add_to(&mut found, trace, &others);
     Ok(found.finish())
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 
-/// The installer UWiper started, and the last comparison.
+/// The installer UWiper started, the last look and the last comparison.
 struct Session {
     installer: Option<imp::Process>,
+    after: Option<(u64, Look)>,
     draft: Option<Draft>,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
     installer: None,
+    after: None,
     draft: None,
 });
 
@@ -765,12 +1162,15 @@ fn session() -> std::sync::MutexGuard<'static, Session> {
 }
 
 fn status(settings: &Settings) -> TrackingStatus {
-    let pending = read_pending(settings);
+    let info = read_info(settings);
+    let s = session();
     TrackingStatus {
-        active: pending.is_some(),
-        started_at: pending.as_ref().map(|p| p.started_at),
-        installer: pending.as_ref().and_then(|p| installer_name(p.installer.as_deref())),
-        installer_running: session().installer.as_ref().is_some_and(imp::Process::running),
+        active: info.is_some(),
+        started_at: info.as_ref().map(|i| i.started_at),
+        elevated: info.as_ref().is_some_and(|i| i.elevated),
+        installer: info.as_ref().and_then(|i| installer_name(i.installer.as_deref())),
+        installer_followed: s.installer.is_some(),
+        installer_running: s.installer.as_ref().is_some_and(imp::Process::running),
     }
 }
 
@@ -788,20 +1188,28 @@ pub async fn start_tracking(state: State<'_, AppState>) -> Result<TrackingStatus
         if !cfg!(windows) {
             return Err(Error::Unsupported);
         }
-        if read_pending(&settings).is_some() {
+        if read_info(&settings).is_some() {
             return Err(Error::Other("An install is already being tracked".into()));
         }
+        // Before looking: whatever is made during the look counts as new.
+        let started_at = now_secs();
+        let salt = hash(
+            &format!("{:?}", std::time::SystemTime::now()),
+            &std::process::id().to_string(),
+        );
         let before = look(&settings);
-        let pending = Pending {
-            started_at: now_secs(),
+        write_json(&snapshot_file(&settings), &snapshot(&before, &salt))?;
+        let info = Info {
+            started_at,
             user: current_user(),
+            elevated: crate::system::is_elevated(),
             installer: None,
-            keys: before.keys(),
-            apps: before.app_versions(),
+            salt,
         };
-        write_json(&pending_file(&settings), &pending)?;
+        write_json(&info_file(&settings), &info)?;
         let mut s = session();
         s.installer = None;
+        s.after = None;
         s.draft = None;
         drop(s);
         Ok(status(&settings))
@@ -809,12 +1217,13 @@ pub async fn start_tracking(state: State<'_, AppState>) -> Result<TrackingStatus
     .await
 }
 
-/// Starts an installer the user picked, with its own UAC prompt if it asks for one.
+/// Starts an installer the user picked. It asks for administrator rights
+/// itself if it needs them.
 #[tauri::command]
 pub async fn launch_installer(state: State<'_, AppState>, path: String) -> Result<()> {
     let settings = settings_of(&state);
     blocking(move || {
-        let mut pending = read_pending(&settings).ok_or(Error::Other("Start tracking first".into()))?;
+        let mut info = read_info(&settings).ok_or(Error::Other("Start tracking first".into()))?;
         let file = Path::new(&path);
         let installer = file
             .extension()
@@ -823,11 +1232,37 @@ pub async fn launch_installer(state: State<'_, AppState>, path: String) -> Resul
             return Err(Error::Other("Pick an .exe or .msi installer".into()));
         }
         let process = imp::launch(file)?;
-        session().installer = Some(process);
-        pending.installer = Some(path);
-        write_json(&pending_file(&settings), &pending)
+        session().installer = process;
+        info.installer = Some(path);
+        write_json(&info_file(&settings), &info)
     })
     .await
+}
+
+fn checked_info(settings: &Settings) -> Result<Info> {
+    let info = read_info(settings).ok_or(Error::Other("No install is being tracked".into()))?;
+    if info.user != current_user() {
+        return Err(Error::Other(
+            "Tracking was started by another Windows user – stop it and start again".into(),
+        ));
+    }
+    if info.elevated != crate::system::is_elevated() {
+        return Err(Error::Other(if info.elevated {
+            "Tracking was started with administrator rights – restart UWiper as administrator to finish it".into()
+        } else {
+            "Tracking was started without administrator rights – open UWiper normally to finish it, or stop tracking and start again".into()
+        }));
+    }
+    Ok(info)
+}
+
+fn compare(settings: &Settings, info: &Info, after: &Look, choice: Option<Option<&str>>) -> Result<Draft> {
+    let before: Snapshot = read_json(&snapshot_file(settings)).ok_or(Error::Other(
+        "The snapshot can't be read – stop tracking and start again".into(),
+    ))?;
+    let since = info.started_at.saturating_sub(5);
+    let new = new_entries(&before, &info.salt, after, &|e| imp::made_since(e, since));
+    Ok(draft(info, &before, after, &new, &Guard::new(settings), choice))
 }
 
 /// Takes the "after" snapshot and returns what's new, for review.
@@ -835,14 +1270,31 @@ pub async fn launch_installer(state: State<'_, AppState>, path: String) -> Resul
 pub async fn finish_tracking(state: State<'_, AppState>) -> Result<Draft> {
     let settings = settings_of(&state);
     blocking(move || {
-        let pending = read_pending(&settings).ok_or(Error::Other("No install is being tracked".into()))?;
-        if pending.user != current_user() {
-            return Err(Error::Other(
-                "Tracking was started by another Windows user – cancel it and start again".into(),
-            ));
-        }
+        let info = checked_info(&settings)?;
         let after = look(&settings);
-        let result = draft(&pending, &after, &Guard::new(&settings));
+        let result = compare(&settings, &info, &after, None)?;
+        // Tracking may have been stopped meanwhile.
+        if read_info(&settings).is_some_and(|i| i.started_at == info.started_at) {
+            let mut s = session();
+            s.after = Some((info.started_at, after));
+            s.draft = Some(result.clone());
+        }
+        Ok(result)
+    })
+    .await
+}
+
+/// Compares again for another app the user picked (`None`: no app).
+#[tauri::command]
+pub async fn choose_trace_app(state: State<'_, AppState>, app_id: Option<String>) -> Result<Draft> {
+    let settings = settings_of(&state);
+    blocking(move || {
+        let info = checked_info(&settings)?;
+        let after = match session().after.clone() {
+            Some((started, look)) if started == info.started_at => look,
+            _ => return Err(Error::Other("Compare again first".into())),
+        };
+        let result = compare(&settings, &info, &after, Some(app_id.as_deref()))?;
         session().draft = Some(result.clone());
         Ok(result)
     })
@@ -854,12 +1306,13 @@ pub async fn finish_tracking(state: State<'_, AppState>) -> Result<Draft> {
 pub async fn save_trace(state: State<'_, AppState>, keep: Vec<String>) -> Result<Trace> {
     let settings = settings_of(&state);
     blocking(move || {
-        let pending = read_pending(&settings).ok_or(Error::Other("No install is being tracked".into()))?;
+        let info = read_info(&settings).ok_or(Error::Other("No install is being tracked".into()))?;
         let draft = session()
             .draft
             .clone()
+            .filter(|d| d.started_at == info.started_at)
             .ok_or(Error::Other("Compare again before saving".into()))?;
-        let items: Vec<TraceItem> = draft
+        let mut items: Vec<TraceItem> = draft
             .items
             .into_iter()
             .filter(|d| keep.contains(&d.item.id))
@@ -868,11 +1321,19 @@ pub async fn save_trace(state: State<'_, AppState>, keep: Vec<String>) -> Result
         if items.is_empty() {
             return Err(Error::Other("Nothing was kept".into()));
         }
+        items.extend(draft.app_item);
+        // What's in each new folder and key now; anything else later isn't this app's.
+        for item in &mut items {
+            if matches!(item.kind.as_str(), "folder" | "registry") {
+                item.children = children_of(&item.target);
+            }
+        }
         let finished_at = now_secs();
-        let mut id = format!("{finished_at}-{}", slug(&draft.name));
+        let base = format!("{finished_at}-{}", slug(&draft.name));
+        let mut id = base.clone();
         let mut n = 2;
         while traces_dir(&settings).join(format!("{id}.json")).exists() {
-            id = format!("{finished_at}-{}-{n}", slug(&draft.name));
+            id = format!("{base}-{n}");
             n += 1;
         }
         let trace = Trace {
@@ -881,15 +1342,14 @@ pub async fn save_trace(state: State<'_, AppState>, keep: Vec<String>) -> Result
             app_id: draft.app_id,
             publisher: draft.publisher,
             version: draft.version,
-            installer: installer_name(pending.installer.as_deref()),
-            started_at: pending.started_at,
+            installer: installer_name(info.installer.as_deref()),
+            started_at: info.started_at,
             finished_at,
             also_installed: draft.also_installed,
             items,
         };
         write_json(&trace_file(&settings, &id)?, &trace)?;
-        let _ = std::fs::remove_file(pending_file(&settings));
-        end_session();
+        clear(&settings);
         log::write(
             &settings,
             &[format!(
@@ -903,18 +1363,11 @@ pub async fn save_trace(state: State<'_, AppState>, keep: Vec<String>) -> Result
     .await
 }
 
-fn end_session() {
-    let mut s = session();
-    s.installer = None;
-    s.draft = None;
-}
-
 #[tauri::command]
 pub async fn cancel_tracking(state: State<'_, AppState>) -> Result<()> {
     let settings = settings_of(&state);
     blocking(move || {
-        let _ = std::fs::remove_file(pending_file(&settings));
-        end_session();
+        clear(&settings);
         Ok(())
     })
     .await
@@ -924,17 +1377,17 @@ pub async fn cancel_tracking(state: State<'_, AppState>) -> Result<()> {
 pub async fn list_traces(state: State<'_, AppState>) -> Result<Vec<TraceView>> {
     let settings = settings_of(&state);
     blocking(move || {
-        let installed: HashSet<String> = apps::list_plain()
-            .unwrap_or_default()
-            .into_iter()
-            .map(|a| a.id)
-            .collect();
+        let installed = apps::list_plain().unwrap_or_default();
         Ok(list(&settings)
             .into_iter()
-            .map(|trace| TraceView {
-                installed: trace.app_id.as_ref().is_some_and(|id| installed.contains(id)),
-                present: trace.items.iter().map(present).collect(),
-                trace,
+            .map(|trace| {
+                let present: Vec<bool> = trace.items.iter().map(present).collect();
+                let (_, still_installed) = other_folders(&trace, &present, &installed);
+                TraceView {
+                    installed: still_installed,
+                    present,
+                    trace,
+                }
             })
             .collect())
     })
@@ -962,6 +1415,14 @@ pub async fn trace_leftovers(state: State<'_, AppState>, id: String) -> Result<V
 // ---------------------------------------------------------------------------
 // Windows
 
+#[derive(Default)]
+struct KnownFolders {
+    desktop: Option<String>,
+    public_desktop: Option<String>,
+    programs: Option<String>,
+    common_programs: Option<String>,
+}
+
 #[cfg(not(windows))]
 mod imp {
     use super::*;
@@ -974,18 +1435,38 @@ mod imp {
         }
     }
 
-    pub fn launch(_file: &Path) -> Result<Process> {
+    pub fn launch(_file: &Path) -> Result<Option<Process>> {
         Err(Error::Unsupported)
     }
 
+    pub fn known_folders() -> KnownFolders {
+        KnownFolders::default()
+    }
+
     pub fn look_registry(_look: &mut Look) {}
+
+    pub fn service_names() -> Option<Vec<String>> {
+        None
+    }
+
+    pub fn environment_values() -> Vec<(String, String)> {
+        Vec::new()
+    }
 
     pub fn driver_packages() -> Vec<(String, Option<String>)> {
         Vec::new()
     }
 
+    pub fn subkeys(_key: &str) -> Option<Vec<String>> {
+        None
+    }
+
     pub fn exists(_target: &Target) -> bool {
         false
+    }
+
+    pub fn made_since(_entry: &Entry, _since: u64) -> bool {
+        true
     }
 }
 
@@ -994,7 +1475,7 @@ mod imp {
     use super::*;
     use crate::targets::{is_published_inf, split_key};
     use crate::util::windows_dir;
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, SYSTEMTIME, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
     use winreg::RegKey;
@@ -1017,11 +1498,23 @@ mod imp {
         }
     }
 
-    pub fn launch(file: &Path) -> Result<Process> {
+    /// Starts the installer. Running as administrator, UWiper hands it to
+    /// Explorer instead, so it starts with the user's own rights – an app it
+    /// opens at the end shouldn't run elevated – and asks for more itself.
+    /// UWiper can't follow it then.
+    pub fn launch(file: &Path) -> Result<Option<Process>> {
         use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE};
         use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
         use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
+        if crate::system::is_elevated() {
+            std::process::Command::new(PathBuf::from(windows_dir()).join("explorer.exe"))
+                .arg(file)
+                .spawn()
+                .map_err(|_| Error::Other("The installer didn't start".into()))?;
+            return Ok(None);
+        }
         let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(Some(0)).collect::<Vec<u16>>();
         let verb = wide("open".as_ref());
         let path = wide(file.as_os_str());
@@ -1033,15 +1526,43 @@ mod imp {
         info.lpFile = path.as_ptr();
         info.lpDirectory = folder.as_ptr();
         info.nShow = SW_SHOWNORMAL;
-        if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let ok = unsafe {
+            // Shell execution may use COM; this thread is UWiper's own worker.
+            CoInitializeEx(
+                std::ptr::null(),
+                (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+            );
+            ShellExecuteExW(&mut info)
+        };
+        if ok == 0 {
             return Err(Error::Other("The installer didn't start".into()));
         }
-        if info.hProcess.is_null() {
-            return Err(Error::Other(
-                "The installer started, but UWiper can't follow it – click Done when it's finished".into(),
-            ));
+        Ok((!info.hProcess.is_null()).then_some(Process(info.hProcess)))
+    }
+
+    /// Desktops and Start menus where Windows really keeps them (OneDrive or
+    /// another drive, say).
+    pub fn known_folders() -> KnownFolders {
+        use windows_sys::Win32::System::Com::CoTaskMemFree;
+        use windows_sys::Win32::UI::Shell::{
+            FOLDERID_CommonPrograms, FOLDERID_Desktop, FOLDERID_Programs, FOLDERID_PublicDesktop, SHGetKnownFolderPath,
+        };
+        let get = |id: &windows_sys::core::GUID| unsafe {
+            let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+            let hr = SHGetKnownFolderPath(id, 0, std::ptr::null_mut(), &mut raw);
+            let out = (hr >= 0 && !raw.is_null()).then(|| {
+                let len = (0..).take_while(|&i| *raw.add(i) != 0).count();
+                String::from_utf16_lossy(std::slice::from_raw_parts(raw, len))
+            });
+            CoTaskMemFree(raw as *const core::ffi::c_void);
+            out.filter(|p| !p.is_empty())
+        };
+        KnownFolders {
+            desktop: get(&FOLDERID_Desktop),
+            public_desktop: get(&FOLDERID_PublicDesktop),
+            programs: get(&FOLDERID_Programs),
+            common_programs: get(&FOLDERID_CommonPrograms),
         }
-        Ok(Process(info.hProcess))
     }
 
     /// Keys under Software that hold Windows' own settings or shared lists.
@@ -1056,18 +1577,26 @@ mod imp {
         "appdatalow",
     ];
 
-    /// Registry keys one or two levels below a root.
-    fn walk(look: &mut Look, hive: &str, path: &str, deep: bool) {
-        let root = RegKey::predef(if hive == "HKLM" {
+    fn hive(name: &str) -> RegKey {
+        RegKey::predef(if name == "HKLM" {
             HKEY_LOCAL_MACHINE
         } else {
             HKEY_CURRENT_USER
-        });
-        let root_name = format!(r"{hive}\{path}");
+        })
+    }
+
+    /// Registry keys one or two levels below a root.
+    fn walk(look: &mut Look, hive_name: &str, path: &str, deep: bool) {
+        let root_name = format!(r"{hive_name}\{path}");
         let root_key = format!("k:{}", root_name.to_lowercase());
-        let Ok(key) = root.open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) else {
-            look.unreadable.insert(format!("x:{root_key}"));
-            return;
+        look.roots.insert(root_key.clone());
+        let key = match hive(hive_name).open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY) {
+            Ok(k) => k,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => {
+                look.unreadable.insert(format!("x:{root_key}"));
+                return;
+            }
         };
         for name in key.enum_keys().flatten() {
             if deep && SHARED_KEYS.contains(&name.to_lowercase().as_str()) {
@@ -1075,31 +1604,33 @@ mod imp {
             }
             let full = format!(r"{root_name}\{name}");
             let entry_key = format!("k:{}", full.to_lowercase());
-            look.entries.push(Entry {
-                key: entry_key.clone(),
-                parent: Some(root_key.clone()),
-                kind: "registry",
-                target: Target::RegistryKey { key: full.clone() },
-                sure: true,
-                store_folder: None,
-            });
+            look.entries.push(Entry::new(
+                entry_key.clone(),
+                Some(root_key.clone()),
+                "registry",
+                Target::RegistryKey { key: full.clone() },
+                true,
+            ));
             if !deep {
                 continue;
             }
-            let Ok(sub) = key.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) else {
-                look.unreadable.insert(format!("x:{entry_key}"));
-                continue;
+            let sub = match key.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    look.unreadable.insert(format!("x:{entry_key}"));
+                    continue;
+                }
             };
             for inner in sub.enum_keys().flatten() {
                 let inner_full = format!(r"{full}\{inner}");
-                look.entries.push(Entry {
-                    key: format!("k:{}", inner_full.to_lowercase()),
-                    parent: Some(entry_key.clone()),
-                    kind: "registry",
-                    target: Target::RegistryKey { key: inner_full },
-                    sure: false,
-                    store_folder: None,
-                });
+                look.entries.push(Entry::new(
+                    format!("k:{}", inner_full.to_lowercase()),
+                    Some(entry_key.clone()),
+                    "registry",
+                    Target::RegistryKey { key: inner_full },
+                    false,
+                ));
             }
         }
     }
@@ -1114,9 +1645,52 @@ mod imp {
         walk(look, "HKLM", &format!(r"SOFTWARE\WOW6432Node\{app_paths}"), false);
     }
 
+    pub fn service_names() -> Option<Vec<String>> {
+        let key = hive("HKLM")
+            .open_subkey_with_flags(r"SYSTEM\CurrentControlSet\Services", KEY_READ)
+            .ok()?;
+        Some(key.enum_keys().flatten().collect())
+    }
+
+    const MACHINE_ENV: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+    /// Environment variables other than PATH and Windows' own, as registry values.
+    pub fn environment_values() -> Vec<(String, String)> {
+        const WINDOWS: [&str; 14] = [
+            "path",
+            "pathext",
+            "temp",
+            "tmp",
+            "os",
+            "windir",
+            "comspec",
+            "psmodulepath",
+            "driverdata",
+            "username",
+            "number_of_processors",
+            "onedrive",
+            "onedriveconsumer",
+            "onedrivecommercial",
+        ];
+        let mut out = Vec::new();
+        for (hive_name, path) in [("HKCU", "Environment"), ("HKLM", MACHINE_ENV)] {
+            let Ok(key) = hive(hive_name).open_subkey_with_flags(path, KEY_READ) else {
+                continue;
+            };
+            for (name, _) in key.enum_values().flatten() {
+                let lower = name.to_lowercase();
+                if name.is_empty() || WINDOWS.contains(&lower.as_str()) || lower.starts_with("processor_") {
+                    continue;
+                }
+                out.push((format!(r"{hive_name}\{path}"), name));
+            }
+        }
+        out
+    }
+
     /// Published third-party driver packages with their Driver Store folders.
     pub fn driver_packages() -> Vec<(String, Option<String>)> {
-        let database = RegKey::predef(HKEY_LOCAL_MACHINE)
+        let database = hive("HKLM")
             .open_subkey_with_flags(r"SYSTEM\DriverDatabase\DriverInfFiles", KEY_READ)
             .ok();
         let Ok(entries) = std::fs::read_dir(PathBuf::from(windows_dir()).join("INF")) else {
@@ -1140,13 +1714,12 @@ mod imp {
     }
 
     fn open(key: &str) -> std::io::Result<RegKey> {
-        let (hive, sub) = split_key(key).ok_or(std::io::ErrorKind::NotFound)?;
-        let root = RegKey::predef(if hive == "HKLM" {
-            HKEY_LOCAL_MACHINE
-        } else {
-            HKEY_CURRENT_USER
-        });
-        root.open_subkey_with_flags(sub, KEY_READ | KEY_WOW64_64KEY)
+        let (hive_name, sub) = split_key(key).ok_or(std::io::ErrorKind::NotFound)?;
+        hive(hive_name).open_subkey_with_flags(sub, KEY_READ | KEY_WOW64_64KEY)
+    }
+
+    pub fn subkeys(key: &str) -> Option<Vec<String>> {
+        Some(open(key).ok()?.enum_keys().flatten().collect())
     }
 
     /// Unreadable counts as there: it may well be.
@@ -1154,17 +1727,62 @@ mod imp {
         !matches!(result, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
     }
 
+    fn service_key(name: &str) -> String {
+        format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{name}")
+    }
+
+    fn task_file(path: &str) -> String {
+        format!(r"{}\System32\Tasks{path}", windows_dir())
+    }
+
     pub fn exists(target: &Target) -> bool {
         match target {
             Target::RegistryKey { key } => there(open(key).map(|_| ())),
             Target::RegistryValue { key, name } => there(open(key).and_then(|k| k.get_raw_value(name).map(|_| ()))),
-            Target::Service { name } => {
-                there(open(&format!(r"HKLM\SYSTEM\CurrentControlSet\Services\{name}")).map(|_| ()))
-            }
-            Target::Task { path } => {
-                there(std::fs::symlink_metadata(format!(r"{}\System32\Tasks{path}", windows_dir())).map(|_| ()))
-            }
+            Target::Service { name } => there(open(&service_key(name)).map(|_| ())),
+            Target::Task { path } => there(std::fs::symlink_metadata(task_file(path)).map(|_| ())),
             _ => false,
+        }
+    }
+
+    /// Unix time of a UTC SYSTEMTIME.
+    fn unix(t: &SYSTEMTIME) -> u64 {
+        // Days from 1970-01-01 (Howard Hinnant's days_from_civil).
+        let (y, m, d) = (i64::from(t.wYear), i64::from(t.wMonth), i64::from(t.wDay));
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let secs = days * 86_400 + i64::from(t.wHour) * 3600 + i64::from(t.wMinute) * 60 + i64::from(t.wSecond);
+        u64::try_from(secs).unwrap_or(0)
+    }
+
+    fn key_written_since(key: &str, since: u64) -> bool {
+        match open(key).and_then(|k| k.query_info()) {
+            Ok(meta) => unix(&meta.get_last_write_time_system()) >= since,
+            Err(_) => true,
+        }
+    }
+
+    fn file_made_since(path: &str, since: u64) -> bool {
+        std::fs::symlink_metadata(path)
+            .and_then(|m| m.created())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_none_or(|t| t.as_secs() >= since)
+    }
+
+    /// False when the thing was surely there before tracking started: made
+    /// (files) or last written (registry keys) earlier. Unknown counts as new.
+    pub fn made_since(entry: &Entry, since: u64) -> bool {
+        match &entry.target {
+            Target::Path { path } => file_made_since(path, since),
+            Target::RegistryKey { key } => key_written_since(key, since),
+            Target::Service { name } => key_written_since(&service_key(name), since),
+            Target::Task { path } => file_made_since(&task_file(path), since),
+            _ => true,
         }
     }
 }
@@ -1174,69 +1792,97 @@ mod tests {
     use super::*;
 
     fn entry(key: &str, parent: Option<&str>, path: &str, sure: bool) -> Entry {
-        Entry {
-            key: key.into(),
-            parent: parent.map(str::to_string),
-            kind: "folder",
-            target: Target::Path { path: path.into() },
+        Entry::new(
+            key.into(),
+            parent.map(str::to_string),
+            "folder",
+            Target::Path { path: path.into() },
             sure,
-            store_folder: None,
+        )
+    }
+
+    const SALT: &str = "salt";
+
+    fn before(keys: &[&str], roots: &[&str]) -> Snapshot {
+        Snapshot {
+            keys: keys.iter().map(|k| hash(SALT, k)).collect(),
+            roots: roots.iter().map(|r| hash(SALT, r)).collect(),
+            ..Snapshot::default()
         }
     }
 
-    fn look_of(entries: Vec<Entry>) -> Look {
+    fn look_of(entries: Vec<Entry>, roots: &[&str]) -> Look {
         Look {
             entries,
+            roots: roots.iter().map(|r| r.to_string()).collect(),
             ..Look::default()
         }
     }
 
-    #[test]
-    fn keeps_only_the_topmost_new_things() {
-        let before: BTreeSet<String> = ["f:c:\\pf\\vendor", "f:c:\\pf\\vendor\\old"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let after = look_of(vec![
-            entry("f:c:\\pf\\vendor", Some("f:c:\\pf"), r"C:\PF\Vendor", true),
-            entry(
-                "f:c:\\pf\\vendor\\old",
-                Some("f:c:\\pf\\vendor"),
-                r"C:\PF\Vendor\Old",
-                false,
-            ),
-            entry(
-                "f:c:\\pf\\vendor\\new",
-                Some("f:c:\\pf\\vendor"),
-                r"C:\PF\Vendor\New",
-                false,
-            ),
-            entry("f:c:\\pf\\app", Some("f:c:\\pf"), r"C:\PF\App", true),
-            entry("f:c:\\pf\\app\\bin", Some("f:c:\\pf\\app"), r"C:\PF\App\bin", false),
-        ]);
-        let new: Vec<String> = new_entries(&before, &after).into_iter().map(|e| e.key).collect();
-        assert_eq!(new, ["f:c:\\pf\\vendor\\new", "f:c:\\pf\\app"]);
+    fn keys(entries: Vec<Entry>) -> Vec<String> {
+        entries.into_iter().map(|e| e.key).collect()
     }
 
     #[test]
-    fn skips_what_couldnt_be_read_before() {
-        let before: BTreeSet<String> = ["x:f:c:\\pd\\locked", "f:c:\\pd\\locked", "x:tasks"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+    fn keeps_only_the_topmost_new_things() {
+        let b = before(&["f:c:\\pf\\vendor", "f:c:\\pf\\vendor\\old"], &["f:c:\\pf"]);
+        let after = look_of(
+            vec![
+                entry("f:c:\\pf\\vendor", Some("f:c:\\pf"), r"C:\PF\Vendor", true),
+                entry(
+                    "f:c:\\pf\\vendor\\old",
+                    Some("f:c:\\pf\\vendor"),
+                    r"C:\PF\Vendor\Old",
+                    false,
+                ),
+                entry(
+                    "f:c:\\pf\\vendor\\new",
+                    Some("f:c:\\pf\\vendor"),
+                    r"C:\PF\Vendor\New",
+                    false,
+                ),
+                entry("f:c:\\pf\\app", Some("f:c:\\pf"), r"C:\PF\App", true),
+                entry("f:c:\\pf\\app\\bin", Some("f:c:\\pf\\app"), r"C:\PF\App\bin", false),
+            ],
+            &["f:c:\\pf"],
+        );
+        assert_eq!(
+            keys(new_entries(&b, SALT, &after, &|_| true)),
+            ["f:c:\\pf\\vendor\\new", "f:c:\\pf\\app"]
+        );
+        // Made before tracking started: not new, whatever the snapshot says.
+        assert_eq!(
+            keys(new_entries(&b, SALT, &after, &|e| e.key != "f:c:\\pf\\app")),
+            ["f:c:\\pf\\vendor\\new"]
+        );
+    }
+
+    #[test]
+    fn skips_what_couldnt_be_read_or_wasnt_looked_at_before() {
+        let b = before(&["x:f:c:\\pd\\locked", "f:c:\\pd\\locked", "x:tasks"], &["f:c:\\pd"]);
         let mut task = entry("t:vendor\\updater", None, "", true);
         task.kind = "task";
-        let after = look_of(vec![
-            entry("f:c:\\pd\\locked", Some("f:c:\\pd"), r"C:\PD\Locked", true),
-            entry(
-                "f:c:\\pd\\locked\\inside",
-                Some("f:c:\\pd\\locked"),
-                r"C:\PD\Locked\Inside",
-                false,
-            ),
-            task,
-        ]);
-        assert!(new_entries(&before, &after).is_empty());
+        let after = look_of(
+            vec![
+                entry("f:c:\\pd\\locked", Some("f:c:\\pd"), r"C:\PD\Locked", true),
+                entry(
+                    "f:c:\\pd\\locked\\inside",
+                    Some("f:c:\\pd\\locked"),
+                    r"C:\PD\Locked\Inside",
+                    false,
+                ),
+                task,
+                // A Desktop that only showed up after tracking started.
+                entry(
+                    "f:d:\\onedrive\\desktop\\old.lnk",
+                    Some("f:d:\\onedrive\\desktop"),
+                    r"D:\OneDrive\Desktop\old.lnk",
+                    true,
+                ),
+            ],
+            &["f:c:\\pd", "f:d:\\onedrive\\desktop"],
+        );
+        assert!(new_entries(&b, SALT, &after, &|_| true).is_empty());
     }
 
     fn app(id: &str, name: &str, publisher: &str, location: Option<&str>) -> AppInfo {
@@ -1256,7 +1902,7 @@ mod tests {
             entry("f:2", None, r"C:\PF\Game\b", true),
             entry("f:3", None, r"C:\PF\Tool\a", true),
         ];
-        let (main, also) = choose_app(
+        let ranked: Vec<String> = rank(
             vec![
                 app(
                     "1",
@@ -1268,10 +1914,66 @@ mod tests {
                 app("3", "Game", "Vendor", Some(r"C:\PF\Game")),
             ],
             &items,
+        )
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+        assert_eq!(
+            ranked,
+            ["Game", "Tool", "Microsoft Visual C++ 2015-2022 Redistributable"]
         );
-        assert_eq!(main.unwrap().name, "Game");
-        let also: Vec<String> = also.into_iter().map(|a| a.name).collect();
-        assert_eq!(also, ["Tool", "Microsoft Visual C++ 2015-2022 Redistributable"]);
+    }
+
+    #[test]
+    fn tells_upgrades_from_new_installs() {
+        let old = vec![app("HKLM|0|{OLD}", "Firefox 130.0 (x64 en-US)", "Mozilla", None)];
+        let snap = snapshot(
+            &Look {
+                apps: old,
+                ..Look::default()
+            },
+            SALT,
+        );
+        let after = Look {
+            apps: vec![
+                app("HKLM|0|{NEW}", "Firefox 131.0 (x64 en-US)", "Mozilla", None),
+                app("HKLM|0|Tool", "Tool", "Vendor", None),
+            ],
+            ..Look::default()
+        };
+        let c = changes(&snap, SALT, &after);
+        assert_eq!(c.upgraded.len(), 1);
+        assert_eq!(c.fresh[0].name, "Tool");
+    }
+
+    #[test]
+    fn a_trace_belongs_to_its_app_after_an_upgrade() {
+        let trace = Trace {
+            id: "1-x".into(),
+            name: "Firefox 130.0 (x64 en-US)".into(),
+            app_id: Some("HKLM|0|{OLD}".into()),
+            publisher: Some("Mozilla".into()),
+            version: None,
+            installer: None,
+            started_at: 0,
+            finished_at: 0,
+            also_installed: vec![],
+            items: vec![],
+        };
+        let upgraded = AppLike {
+            id: "HKLM|0|{NEW}",
+            name: "Firefox 131.0 (x64 en-US)",
+            publisher: Some("Mozilla Corporation"),
+            location: None,
+        };
+        assert!(belongs(&trace, &[], &upgraded));
+        let other = AppLike {
+            id: "HKLM|0|Thunderbird",
+            name: "Thunderbird",
+            publisher: Some("Mozilla"),
+            location: None,
+        };
+        assert!(!belongs(&trace, &[], &other));
     }
 
     #[test]
@@ -1290,13 +1992,26 @@ mod tests {
         for name in ["Discord", "JetBrains", "Steam"] {
             assert!(!skip_name(name), "{name}");
         }
+        assert!(skip_drive_name("$Recycle.Bin") && skip_drive_name("Program Files") && !skip_drive_name("xampp"));
+        assert!(microsoft_path(
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+        ));
+        assert!(!microsoft_path(r"C:\Program Files\Steam\steam.exe"));
     }
 
     #[test]
     fn trace_ids_stay_inside_the_traces_folder() {
         let settings = Settings::default();
-        assert!(trace_file(&settings, r"..\secrets").is_err());
-        assert!(trace_file(&settings, "a.b").is_err());
-        assert!(trace_file(&settings, "1700000000-discord").is_ok());
+        for bad in [r"..\secrets", "a.b", "COM1", "1700000000-Discord", "-x", "1700000000"] {
+            assert!(trace_file(&settings, bad).is_err(), "{bad}");
+        }
+        assert!(trace_file(&settings, "1700000000-discord-2").is_ok());
+    }
+
+    #[test]
+    fn hashes_are_salted_and_stable() {
+        assert_eq!(hash("a", "x"), hash("a", "x"));
+        assert_ne!(hash("a", "x"), hash("b", "x"));
+        assert_eq!(hash("", "").len(), 16);
     }
 }
