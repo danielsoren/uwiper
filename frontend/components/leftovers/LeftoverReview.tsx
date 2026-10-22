@@ -9,6 +9,7 @@ const GROUPS: { title: string; kinds: Leftover['kind'][] }[] = [
   { title: 'Files & folders', kinds: ['folder', 'file', 'shortcut'] },
   { title: 'Registry', kinds: ['registry'] },
   { title: 'PATH entries', kinds: ['environment'] },
+  { title: 'Driver packages', kinds: ['driver'] },
 ];
 
 const KIND_ICON: Record<Leftover['kind'], IconName> = {
@@ -21,6 +22,7 @@ const KIND_ICON: Record<Leftover['kind'], IconName> = {
   service: 'cog',
   task: 'calendar',
   startup: 'power',
+  driver: 'cpu',
 };
 
 const CONFIDENCE: Record<Confidence, { tone: PillTone; label: string; hint: string }> = {
@@ -41,12 +43,15 @@ export function LeftoverReview({
   selected,
   onChange,
   canRemove,
+  appTitle = 'Apps that are gone',
 }: {
   items: Leftover[];
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
   /** False for items that need administrator rights UWiper doesn't have. */
   canRemove: (l: Leftover) => boolean;
+  /** What the group of uninstall entries is called here. */
+  appTitle?: string;
 }) {
   const toggle = (ids: string[], on: boolean) => {
     const next = new Set(selected);
@@ -69,13 +74,13 @@ export function LeftoverReview({
           <section key={group.title} className="overflow-hidden rounded-card border border-line-2 bg-fill">
             <div className="flex min-h-11 items-center gap-3 border-b border-line px-4 py-2">
               <Checkbox
-                label={`Select all: ${group.title}`}
+                label={`Select all: ${group.kinds.includes('app') ? appTitle : group.title}`}
                 checked={ids.length > 0 && picked === ids.length}
                 mixed={picked > 0 && picked < ids.length}
                 disabled={ids.length === 0}
                 onChange={(on) => toggle(ids, on)}
               />
-              <h3 className="flex-1 text-label font-semibold">{group.title}</h3>
+              <h3 className="flex-1 text-label font-semibold">{group.kinds.includes('app') ? appTitle : group.title}</h3>
               <span className="text-small text-fg-3">
                 {rows.length}
                 {bytes > 0 && ` · ${formatBytes(bytes)}`}

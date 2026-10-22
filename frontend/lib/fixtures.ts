@@ -11,6 +11,11 @@ import type {
   Leftover,
   OrphanScan,
   Removal,
+  Trace,
+  TraceDraft,
+  TraceItem,
+  TraceView,
+  TrackingStatus,
   RemoveReport,
   ServiceItem,
   Settings,
@@ -228,6 +233,7 @@ function remove(title: string, items: Removal[]): RemoveReport {
   services = services.filter((i) => !gone(i.removal));
   tasks = tasks.filter((i) => !gone(i.removal));
   drivers = drivers.filter((i) => !gone(i.removal));
+  for (const t of traces) for (const i of t.items) if (items.some((r) => sameTarget(r.target, i.target))) traceGone.add(i.id);
   orphans = before.filter((l) => !gone(l.target));
   const id = `${now()}-${batches.length}`;
   if (settings.safety.quarantine) {
@@ -239,6 +245,73 @@ function remove(title: string, items: Removal[]): RemoveReport {
 
 let uninstalling: { id: string; at: number } | null = null;
 
+// Install tracking: one tracked app still installed, one whose app is gone.
+const item = (kind: TraceItem['kind'], label: string, target: TraceItem['target'], sure = true): TraceItem => ({ id: `${kind}:${label.toLowerCase()}`, kind, label, target, sure });
+const pathItem = (kind: TraceItem['kind'], p: string, sure = true) => item(kind, p, { kind: 'path', path: p }, sure);
+const keyItem = (kind: TraceItem['kind'], k: string) => item(kind, k, { kind: 'registryKey', key: k });
+let traces: Trace[] = [
+  {
+    id: '1-obs', name: 'OBS Studio', appId: 'HKLM|OBS Studio', publisher: 'OBS Project', version: '31.1.2', installer: 'OBS-Studio-31.1.2-Windows-Installer.exe',
+    startedAt: now() - 84 * DAY - 300, finishedAt: now() - 84 * DAY, alsoInstalled: [],
+    items: [
+      pathItem('folder', 'C:\\Program Files\\obs-studio'),
+      pathItem('folder', 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\OBS Studio'),
+      pathItem('shortcut', 'C:\\Users\\Public\\Desktop\\OBS Studio.lnk'),
+      keyItem('registry', 'HKLM\\SOFTWARE\\OBS Studio'),
+      keyItem('app', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OBS Studio'),
+      item('service', 'Service OBS Virtual Camera', { kind: 'service', name: 'OBSVirtualCam' }),
+    ],
+  },
+  {
+    id: '2-ravenswatch', name: 'Ravenswatch', appId: 'HKLM|Ravenswatch', publisher: 'Passtech Games', version: '1.4', installer: 'setup_ravenswatch_1.4.exe',
+    startedAt: now() - 200 * DAY - 600, finishedAt: now() - 200 * DAY, alsoInstalled: ['Microsoft Visual C++ 2015-2022 Redistributable (x64)'],
+    items: [
+      pathItem('folder', 'C:\\Games\\Ravenswatch'),
+      pathItem('folder', 'C:\\Users\\you\\AppData\\Roaming\\Ravenswatch'),
+      keyItem('registry', 'HKCU\\Software\\Passtech Games'),
+      pathItem('shortcut', 'C:\\Users\\you\\Desktop\\Ravenswatch.lnk'),
+    ],
+  },
+];
+// Items of the second trace that the uninstaller already removed.
+const traceGone = new Set(['folder:c:\\games\\ravenswatch', 'shortcut:c:\\users\\you\\desktop\\ravenswatch.lnk']);
+let tracking: TrackingStatus & { launchedAt?: number } = { active: false, startedAt: null, installer: null, installerRunning: false };
+let draft: TraceDraft | null = null;
+
+const traceViews = (): TraceView[] =>
+  traces.map((t) => ({ ...t, installed: apps.some((a) => a.id === t.appId), present: t.items.map((i) => !traceGone.has(i.id)) }));
+
+function sampleDraft(): TraceDraft {
+  const local = 'C:\\Users\\you\\AppData\\Local';
+  const roaming = 'C:\\Users\\you\\AppData\\Roaming';
+  const sized = (i: TraceItem, mb: number | null) => ({ ...i, sizeBytes: mb === null ? null : mb * MB });
+  return {
+    name: 'Obsidian', appId: 'HKLM|Obsidian', publisher: 'Obsidian', version: '1.7.7', updated: false,
+    alsoInstalled: [], tasksChecked: environment.elevated,
+    items: [
+      sized(pathItem('folder', `${local}\\Programs\\Obsidian`), 412),
+      sized(pathItem('folder', `${roaming}\\obsidian`), 3),
+      sized(pathItem('shortcut', `${roaming}\\Microsoft\\Windows\\Start Menu\\Programs\\Obsidian.lnk`), 0.002),
+      sized(pathItem('shortcut', 'C:\\Users\\you\\Desktop\\Obsidian.lnk'), 0.002),
+      sized(keyItem('registry', 'HKCU\\Software\\obsidian'), null),
+      sized(keyItem('app', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Obsidian'), null),
+      sized(pathItem('folder', `${roaming}\\Code\\logs\\20261022T101500`, false), 1),
+    ],
+  };
+}
+
+const traceLeftovers = (id: string): Leftover[] => {
+  const view = traceViews().find((t) => t.id === id);
+  if (!view) throw new Error('This trace is gone');
+  return view.items
+    .filter((_, i) => view.present[i])
+    .map((i) => ({
+      id: i.id, kind: i.kind, label: i.label, confidence: i.sure ? 'high' : 'medium', sizeBytes: i.target.kind === 'path' ? 24 * MB : null,
+      modified: null, needsAdmin: false, target: i.target,
+      reason: `Added when it was installed – tracked ${new Date(view.finishedAt * 1000).toISOString().slice(0, 10)}`,
+    }));
+};
+
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // `?delay=3000` in the URL slows the scans down, to look at loading states.
@@ -246,7 +319,7 @@ const extraDelay = Number(new URLSearchParams(window.location.search).get('delay
 
 export async function fixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const atStart = command === 'environment' || command === 'get_settings';
-  const slow = ['scan_cleanup', 'scan_leftovers', 'scan_orphans', 'create_restore_point', 'clean_caches'].includes(command);
+  const slow = ['scan_cleanup', 'scan_leftovers', 'scan_orphans', 'create_restore_point', 'clean_caches', 'start_tracking', 'finish_tracking'].includes(command);
   await delay(atStart ? 50 : (slow ? 1200 : 250) + extraDelay);
   const result = ((): unknown => {
     switch (command) {
@@ -257,6 +330,31 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
       case 'list_services': return services;
       case 'list_tasks': return tasks;
       case 'list_drivers': return drivers;
+      case 'tracking_status': {
+        const { launchedAt, ...status } = tracking;
+        return { ...status, installerRunning: !!launchedAt && Date.now() - launchedAt < 5000 };
+      }
+      case 'start_tracking': {
+        if (tracking.active) throw new Error('An install is already being tracked');
+        tracking = { active: true, startedAt: now(), installer: null, installerRunning: false };
+        return tracking;
+      }
+      case 'launch_installer': tracking = { ...tracking, installer: (args?.path as string).split('\\').pop() ?? null, launchedAt: Date.now() }; return null;
+      case 'finish_tracking': draft = sampleDraft(); return draft;
+      case 'save_trace': {
+        if (!draft) throw new Error('Compare again before saving');
+        const keep = args?.keep as string[];
+        const saved: Trace = { id: `${now()}-obsidian`, name: draft.name, appId: draft.appId, publisher: draft.publisher, version: draft.version, installer: tracking.installer, startedAt: tracking.startedAt ?? now(), finishedAt: now(), alsoInstalled: draft.alsoInstalled, items: draft.items.filter((i) => keep.includes(i.id)).map(({ sizeBytes: _, ...i }) => i) };
+        traces = [saved, ...traces];
+        if (!apps.some((a) => a.id === 'HKLM|Obsidian')) apps = [...apps, app('Obsidian', 'Obsidian', '1.7.7', 412, '2026-10-22', 'C:\\Users\\you\\AppData\\Local\\Programs\\Obsidian', 'win32', 'user')];
+        tracking = { active: false, startedAt: null, installer: null, installerRunning: false };
+        draft = null;
+        return saved;
+      }
+      case 'cancel_tracking': tracking = { active: false, startedAt: null, installer: null, installerRunning: false }; draft = null; return null;
+      case 'list_traces': return traceViews();
+      case 'delete_trace': traces = traces.filter((t) => t.id !== args?.id); return null;
+      case 'trace_leftovers': return traceLeftovers(args?.id as string);
       case 'set_startup_enabled': {
         const item = startup.find((i) => i.id === args?.id);
         if (item?.needsAdmin && !environment.elevated) throw new Error('Needs administrator rights – restart UWiper as administrator');

@@ -12,9 +12,11 @@ import type {
   StartupItem,
   StorageInfo,
   TaskItem,
+  TraceView,
+  TrackingStatus,
 } from '../lib/types';
 
-export type Page = 'overview' | 'apps' | 'leftovers' | 'cleanup' | 'system' | 'quarantine' | 'settings';
+export type Page = 'overview' | 'apps' | 'leftovers' | 'cleanup' | 'system' | 'installs' | 'quarantine' | 'settings';
 
 /** Data loaded from the backend on demand and cached for the session. */
 export interface Resources {
@@ -24,6 +26,8 @@ export interface Resources {
   services: ServiceItem[];
   tasks: TaskItem[];
   drivers: DriverItem[];
+  traces: TraceView[];
+  tracking: TrackingStatus;
   storage: StorageInfo;
   quarantine: Batch[];
   orphans: OrphanScan;
@@ -45,6 +49,8 @@ const FETCH: { [K in ResourceKey]: () => Promise<Resources[K]> } = {
   services: api.listServices,
   tasks: api.listTasks,
   drivers: api.listDrivers,
+  traces: api.listTraces,
+  tracking: api.trackingStatus,
   storage: api.storageInfo,
   quarantine: api.listQuarantine,
   orphans: api.scanOrphans,
@@ -104,6 +110,8 @@ export const useAppStore = create<AppState>()((set, get) => {
       services: idle(),
       tasks: idle(),
       drivers: idle(),
+      traces: idle(),
+      tracking: idle(),
       storage: idle(),
       quarantine: idle(),
       orphans: idle(),
@@ -119,6 +127,9 @@ export const useAppStore = create<AppState>()((set, get) => {
       const settings = api.getSettings().then((settings) => set({ settings }), (e) => get().notify(errorText(e)));
       // Settings shows these numbers, so measure them before the first screen.
       get().load('storage');
+      // The sidebar shows whether an install is being tracked, and Apps which apps were.
+      get().load('tracking');
+      get().load('traces');
       Promise.all([env, settings]).then(() => set({ ready: true }));
     },
 
@@ -141,7 +152,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       if (data) patch(key, { data: change(data) });
     },
 
-    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks', 'drivers', 'orphans'),
+    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks', 'drivers', 'traces', 'orphans'),
 
     updateSettings: (change) => {
       const before = get().settings;

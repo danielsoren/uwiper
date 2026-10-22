@@ -215,6 +215,10 @@ fn roots() -> Vec<Root> {
         add(format!(r"{profile}\AppData\LocalLow"), true, false);
         add(format!(r"{profile}\Desktop"), false, false);
     }
+    // A Desktop that OneDrive keeps.
+    if let Some(onedrive) = env("OneDrive") {
+        add(format!(r"{onedrive}\Desktop"), false, false);
+    }
     if let Some(public) = env("PUBLIC") {
         add(format!(r"{public}\Desktop"), false, false);
     }
@@ -290,12 +294,15 @@ fn look_files(look: &mut Look, own: &[String]) {
                 continue;
             }
             let key = format!("f:{}", norm_path(&text));
+            let kind = path_kind(&path, file_type.is_dir());
             look.entries.push(Entry {
                 key: key.clone(),
                 parent: Some(root_key.clone()),
-                kind: path_kind(&path, file_type.is_dir()),
+                kind,
                 target: Target::Path { path: text.clone() },
-                sure: true,
+                // New folders and shortcuts are an installer's doing; a loose
+                // new file (on the Desktop, say) may well be someone else's.
+                sure: kind != "file",
                 store_folder: None,
             });
             if !root.deep || !file_type.is_dir() {

@@ -63,6 +63,8 @@ export function Sidebar() {
   const cleanup = useAppStore((s) => s.res.cleanup.data);
   const orphans = useAppStore((s) => s.res.orphans.data);
   const batches = useAppStore((s) => s.res.quarantine.data);
+  const traces = useAppStore((s) => s.res.traces.data);
+  const tracking = useAppStore((s) => s.res.tracking.data);
   const restartAsAdmin = useAppStore((s) => s.restartAsAdmin);
 
   // Only the finds UWiper is fairly sure about; guesses don't make a badge.
@@ -77,6 +79,7 @@ export function Sidebar() {
   ];
   const manage: NavItem[] = [
     { page: 'system', label: 'System', icon: 'cpu' },
+    { page: 'installs', label: 'Installs', icon: 'install', badge: tracking?.active ? 'Tracking' : traces?.length ? String(traces.length) : undefined },
     { page: 'quarantine', label: 'Quarantine', icon: 'archive', badge: batches?.length ? String(batches.length) : undefined },
   ];
 
