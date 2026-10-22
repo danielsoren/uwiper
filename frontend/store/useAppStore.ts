@@ -56,6 +56,8 @@ export interface Toast {
 
 interface AppState {
   page: Page;
+  /** A section or tab the page should bring into view, set by `go`. */
+  focus: string | null;
   /** False until the first data has loaded; the splash screen shows meanwhile. */
   ready: boolean;
   env: Environment | null;
@@ -63,7 +65,7 @@ interface AppState {
   res: { [K in ResourceKey]: Resource<Resources[K]> };
   toasts: Toast[];
 
-  go: (page: Page) => void;
+  go: (page: Page, focus?: string) => void;
   init: () => void;
   /** Loads once per session; `force` loads again. */
   load: <K extends ResourceKey>(key: K, force?: boolean) => void;
@@ -86,6 +88,7 @@ export const useAppStore = create<AppState>()((set, get) => {
 
   return {
     page: 'overview',
+    focus: null,
     ready: false,
     env: null,
     settings: null,
@@ -101,7 +104,7 @@ export const useAppStore = create<AppState>()((set, get) => {
     },
     toasts: [],
 
-    go: (page) => set({ page }),
+    go: (page, focus) => set({ page, focus: focus ?? null }),
 
     init: () => {
       if (started) return;

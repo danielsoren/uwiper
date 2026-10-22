@@ -65,7 +65,7 @@ export function Overview() {
               See what's inside
             </Button>
           </div>
-          <CacheBreakdown items={items} onlyDefault onPick={() => go('cleanup')} />
+          <CacheBreakdown items={items} onlyDefault onPick={(group) => go('cleanup', group)} />
         </Card>
 
         <div className="flex flex-wrap gap-3">
@@ -101,7 +101,7 @@ export function Overview() {
             loading={startup.loading}
             label="Start with Windows"
             sub={startup.error ?? (startup.data ? `${plural(startup.data.length, 'entry', 'entries')} in total` : 'Reading…')}
-            onClick={() => go('system')}
+            onClick={() => go('system', 'startup')}
           />
           <StatCard
             icon="archive"

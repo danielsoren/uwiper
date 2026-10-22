@@ -8,7 +8,7 @@ import { CLEANUP_GROUPS } from '../lib/cleanupGroups';
 import { cn } from '../lib/cn';
 import { formatBytes, plural } from '../lib/format';
 import type { CleanupItem } from '../lib/types';
-import { useResource } from '../store/hooks';
+import { useFocus, useResource } from '../store/hooks';
 import { useAppStore } from '../store/useAppStore';
 import { Button, Callout, Card, Checkbox, Collapse, Icon, ListCard, Note, Skeleton, SkeletonRows, Tag } from '../ui';
 
@@ -19,6 +19,7 @@ export function Cleanup() {
   // What the user ticked or unticked; everything else follows its default.
   const [picks, setPicks] = useState<Record<string, boolean>>({});
   const [cleaning, setCleaning] = useState<CleanupItem[] | null>(null);
+  const flash = useFocus(!!cleanup.data);
 
   const items = cleanup.data ?? [];
   const isPicked = (i: CleanupItem) => i.sizeBytes > 0 && (picks[i.id] ?? i.defaultOn);
@@ -83,7 +84,7 @@ export function Cleanup() {
               const nonEmpty = g.items.filter((i) => i.sizeBytes > 0);
               const count = nonEmpty.filter(isPicked).length;
               return (
-                <ListCard key={g.group}>
+                <ListCard key={g.group} id={`section-${g.group}`} className={cn('scroll-mt-1', flash === g.group && 'flash')}>
                   <div className="flex min-h-14 items-center gap-3 px-4 py-2.5">
                     <Checkbox
                       label={`Select all: ${CLEANUP_GROUPS[g.group].label}`}

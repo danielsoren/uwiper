@@ -31,7 +31,7 @@ export function CacheBreakdown({
   items: CleanupItem[];
   onlyDefault?: boolean;
   inline?: boolean;
-  onPick?: () => void;
+  onPick?: (group: string) => void;
 }) {
   const parts = cleanupGroupsOf(onlyDefault ? items.filter((i) => i.defaultOn) : items).map((g) => ({
     key: g.group,
@@ -55,7 +55,7 @@ export function CacheBreakdown({
             <button
               key={p.key}
               type="button"
-              onClick={onPick}
+              onClick={() => onPick?.(p.key)}
               className="flex min-h-11 items-center gap-3 rounded-control px-2.5 text-left hover:bg-hover"
             >
               <span className="size-2.5 flex-none rounded-[3px]" style={{ background: p.color }} />

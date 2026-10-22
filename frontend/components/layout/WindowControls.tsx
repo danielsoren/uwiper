@@ -26,15 +26,29 @@ export function CaptionButtons() {
   );
 }
 
-const LIGHT = 'size-3 rounded-full group-hover:brightness-85';
+const LIGHTS = [
+  { label: 'Close', action: 'close', color: 'bg-[#ff5f57]', glyph: 'M4 4l4 4M8 4l-4 4' },
+  { label: 'Minimize', action: 'minimize', color: 'bg-[#febc2e]', glyph: 'M3.5 6h5' },
+  { label: 'Maximize', action: 'toggleMaximize', color: 'bg-[#28c840]', glyph: 'M6 3.5v5M3.5 6h5' },
+] as const;
 
-/** macOS-style traffic lights for the top of the sidebar. */
+/** macOS-style traffic lights for the top of the sidebar. Each light reacts only to its own hover. */
 export function TrafficLights() {
   return (
-    <div className="group flex gap-2 px-2 pb-3 pt-1.5" data-tauri-drag-region>
-      <button type="button" aria-label="Close" onClick={() => windowAction('close')} className={cn(LIGHT, 'bg-[#ff5f57]')} />
-      <button type="button" aria-label="Minimize" onClick={() => windowAction('minimize')} className={cn(LIGHT, 'bg-[#febc2e]')} />
-      <button type="button" aria-label="Maximize" onClick={() => windowAction('toggleMaximize')} className={cn(LIGHT, 'bg-[#28c840]')} />
+    <div className="flex gap-2 px-2 pb-3 pt-1.5" data-tauri-drag-region>
+      {LIGHTS.map((l) => (
+        <button
+          key={l.action}
+          type="button"
+          aria-label={l.label}
+          onClick={() => windowAction(l.action)}
+          className={cn('group/light grid size-3 place-items-center rounded-full', l.color)}
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="opacity-0 transition-opacity group-hover/light:opacity-100">
+            <path d={l.glyph} stroke="rgb(0 0 0 / 0.55)" strokeWidth="1.3" strokeLinecap="round" fill="none" />
+          </svg>
+        </button>
+      ))}
     </div>
   );
 }
