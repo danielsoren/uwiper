@@ -15,6 +15,7 @@ export { ListCard, ListRow } from './List';
 export { Callout, Note } from './Note';
 export { Pill, Tag, type PillTone } from './Pill';
 export { SegmentCount, Segmented } from './Segmented';
+export { Select } from './Select';
 export { Skeleton, SkeletonRows } from './Skeleton';
 export { Loading, Spinner } from './Spinner';
 export { Switch } from './Switch';

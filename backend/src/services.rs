@@ -3,9 +3,12 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use serde::Serialize;
+use tauri::State;
 
-use crate::error::{blocking, Result};
+use crate::error::{blocking, Error, Result};
+use crate::quarantine::settings_of;
 use crate::targets::Target;
+use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +32,41 @@ pub fn list() -> Result<Vec<ServiceItem>> {
     imp::list()
 }
 
+/// Sets how a service starts: "automatic", "delayed", "manual" or "disabled".
+#[tauri::command]
+pub async fn set_service_start(state: State<'_, AppState>, name: String, start: String) -> Result<()> {
+    let settings = settings_of(&state);
+    blocking(move || {
+        let label = match start.as_str() {
+            "automatic" => "Automatic",
+            "delayed" => "Automatic (delayed)",
+            "manual" => "Manual",
+            "disabled" => "Disabled",
+            _ => return Err(Error::Other("Unknown start type".into())),
+        };
+        let item = list()?
+            .into_iter()
+            .find(|s| s.name.eq_ignore_ascii_case(&name))
+            .ok_or(Error::Other("This service is gone – scan again".into()))?;
+        if item.is_windows {
+            return Err(Error::Other("Part of Windows – UWiper leaves it as is".into()));
+        }
+        if !crate::system::is_elevated() {
+            return Err(Error::NeedsAdmin);
+        }
+        imp::set_start(&item.name, &start)?;
+        log::write(
+            &settings,
+            &[format!(
+                "Service «{}» ({}) set to {label}",
+                item.display_name, item.name
+            )],
+        );
+        Ok(())
+    })
+    .await
+}
+
 fn start_type(start: u32) -> &'static str {
     match start {
         0 => "boot",
@@ -47,6 +85,10 @@ mod imp {
     pub fn list() -> Result<Vec<ServiceItem>> {
         Err(Error::Unsupported)
     }
+
+    pub fn set_start(_name: &str, _start: &str) -> Result<()> {
+        Err(Error::Unsupported)
+    }
 }
 
 #[cfg(windows)]
@@ -60,6 +102,68 @@ mod imp {
     const WIN32_SERVICE: u32 = 0x30;
     // Per-user service templates (0x50, 0x60)
     const USER_SERVICE: u32 = 0x40;
+
+    /// Through the Service Control Manager, so the change applies at once.
+    pub fn set_start(name: &str, start: &str) -> Result<()> {
+        use windows_sys::Win32::System::Services::{
+            ChangeServiceConfig2W, ChangeServiceConfigW, CloseServiceHandle, OpenSCManagerW, OpenServiceW,
+            SC_MANAGER_CONNECT, SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG, SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+            SERVICE_DELAYED_AUTO_START_INFO, SERVICE_DEMAND_START, SERVICE_DISABLED, SERVICE_NO_CHANGE,
+        };
+        let (start_type, delayed) = match start {
+            "automatic" => (SERVICE_AUTO_START, false),
+            "delayed" => (SERVICE_AUTO_START, true),
+            "manual" => (SERVICE_DEMAND_START, false),
+            _ => (SERVICE_DISABLED, false),
+        };
+        let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let failed = || {
+            let e = std::io::Error::last_os_error();
+            match e.raw_os_error() {
+                Some(5) => Error::NeedsAdmin,
+                _ => Error::Io(e),
+            }
+        };
+        unsafe {
+            let manager = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
+            if manager.is_null() {
+                return Err(failed());
+            }
+            let service = OpenServiceW(manager, wide.as_ptr(), SERVICE_CHANGE_CONFIG);
+            if service.is_null() {
+                let e = failed();
+                CloseServiceHandle(manager);
+                return Err(e);
+            }
+            let mut ok = ChangeServiceConfigW(
+                service,
+                SERVICE_NO_CHANGE,
+                start_type,
+                SERVICE_NO_CHANGE,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            ) != 0;
+            if ok && start_type == SERVICE_AUTO_START {
+                let info = SERVICE_DELAYED_AUTO_START_INFO {
+                    fDelayedAutostart: i32::from(delayed),
+                };
+                ok = ChangeServiceConfig2W(
+                    service,
+                    SERVICE_CONFIG_DELAYED_AUTO_START_INFO,
+                    &info as *const SERVICE_DELAYED_AUTO_START_INFO as *const core::ffi::c_void,
+                ) != 0;
+            }
+            let e = (!ok).then(failed);
+            CloseServiceHandle(service);
+            CloseServiceHandle(manager);
+            e.map_or(Ok(()), Err)
+        }
+    }
 
     pub fn list() -> Result<Vec<ServiceItem>> {
         let root = RegKey::predef(HKEY_LOCAL_MACHINE)

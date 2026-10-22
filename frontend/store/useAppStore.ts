@@ -3,6 +3,7 @@ import { api, errorText } from '../lib/api';
 import type {
   Batch,
   CleanupItem,
+  DriverItem,
   OrphanScan,
   Environment,
   InstalledApp,
@@ -22,6 +23,7 @@ export interface Resources {
   startup: StartupItem[];
   services: ServiceItem[];
   tasks: TaskItem[];
+  drivers: DriverItem[];
   storage: StorageInfo;
   quarantine: Batch[];
   orphans: OrphanScan;
@@ -42,6 +44,7 @@ const FETCH: { [K in ResourceKey]: () => Promise<Resources[K]> } = {
   startup: api.listStartup,
   services: api.listServices,
   tasks: api.listTasks,
+  drivers: api.listDrivers,
   storage: api.storageInfo,
   quarantine: api.listQuarantine,
   orphans: api.scanOrphans,
@@ -73,6 +76,8 @@ interface AppState {
   refresh: (...keys: ResourceKey[]) => void;
   /** After anything was removed or restored: every list it can show up in. */
   afterChange: () => void;
+  /** Changes loaded data in place, e.g. to show a switch flipped before the backend confirms it. */
+  update: <K extends ResourceKey>(key: K, change: (data: Resources[K]) => Resources[K]) => void;
   /** Applies a change right away and saves it; a failed save rolls it back. */
   updateSettings: (change: (s: Settings) => Settings) => void;
   notify: (text: string) => void;
@@ -98,6 +103,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       startup: idle(),
       services: idle(),
       tasks: idle(),
+      drivers: idle(),
       storage: idle(),
       quarantine: idle(),
       orphans: idle(),
@@ -130,7 +136,12 @@ export const useAppStore = create<AppState>()((set, get) => {
       for (const key of keys) if (get().res[key].requested) get().load(key, true);
     },
 
-    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks', 'orphans'),
+    update: (key, change) => {
+      const data = get().res[key].data;
+      if (data) patch(key, { data: change(data) });
+    },
+
+    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks', 'drivers', 'orphans'),
 
     updateSettings: (change) => {
       const before = get().settings;

@@ -4,10 +4,13 @@
 use std::path::Path;
 
 use serde::Serialize;
+use tauri::State;
 
 use crate::error::{blocking, Error, Result};
+use crate::quarantine::settings_of;
 use crate::targets::Target;
-use crate::util::{expand_env, program_state, resolve_executable, uses_per_user_vars};
+use crate::util::{decode_text, expand_env, program_state, resolve_executable, uses_per_user_vars};
+use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +30,29 @@ pub struct TaskItem {
 #[tauri::command]
 pub async fn list_tasks() -> Result<Vec<TaskItem>> {
     blocking(list).await
+}
+
+#[tauri::command]
+pub async fn set_task_enabled(state: State<'_, AppState>, name: String, enabled: bool) -> Result<()> {
+    let settings = settings_of(&state);
+    blocking(move || {
+        let task = list()?
+            .into_iter()
+            .find(|t| t.name == name)
+            .ok_or(Error::Other("This task is gone – scan again".into()))?;
+        if task.is_windows {
+            return Err(Error::Other("Part of Windows – UWiper leaves it as is".into()));
+        }
+        let path = format!(r"\{}", task.name);
+        crate::util::run_tool(
+            "schtasks.exe",
+            &["/Change", "/TN", &path, if enabled { "/ENABLE" } else { "/DISABLE" }],
+        )?;
+        let state = if enabled { "turned on" } else { "turned off" };
+        log::write(&settings, &[format!("Scheduled task {path} {state}")]);
+        Ok(())
+    })
+    .await
 }
 
 pub fn list() -> Result<Vec<TaskItem>> {
@@ -68,29 +94,6 @@ pub fn list() -> Result<Vec<TaskItem>> {
     Ok(out)
 }
 
-/// Task files are usually UTF-16 with a BOM.
-fn decode(bytes: &[u8]) -> Option<String> {
-    let utf16 = |data: &[u8], le: bool| {
-        let units: Vec<u16> = data
-            .chunks_exact(2)
-            .map(|c| {
-                if le {
-                    u16::from_le_bytes([c[0], c[1]])
-                } else {
-                    u16::from_be_bytes([c[0], c[1]])
-                }
-            })
-            .collect();
-        String::from_utf16(&units).ok()
-    };
-    match bytes {
-        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
-        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8(rest.to_vec()).ok(),
-        _ => String::from_utf8(bytes.to_vec()).ok().or_else(|| utf16(bytes, true)),
-    }
-}
-
 fn trigger_label(tag: &str) -> &'static str {
     match tag {
         "LogonTrigger" => "At log on",
@@ -106,7 +109,7 @@ fn trigger_label(tag: &str) -> &'static str {
 }
 
 fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
-    let text = decode(bytes)?;
+    let text = decode_text(bytes);
     let doc = roxmltree::Document::parse(text.trim_start_matches('\u{feff}')).ok()?;
     let is = |n: &roxmltree::Node, tag: &str| n.is_element() && n.tag_name().name() == tag;
     let child_text = |parent: Option<roxmltree::Node>, tag: &str| {

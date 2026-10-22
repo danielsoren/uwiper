@@ -1,5 +1,5 @@
 //! Things UWiper can remove: files and folders, registry keys and values,
-//! services and scheduled tasks. Each one is checked against the safety rules,
+//! services, scheduled tasks and driver packages. Each one is checked against the safety rules,
 //! can be backed up into a quarantine folder first and put back from there.
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -26,6 +26,8 @@ pub enum Target {
     Task { path: String },
     /// One folder in the user's ("user") or everyone's ("machine") PATH.
     PathEntry { scope: String, entry: String },
+    /// A third-party driver package, by its published name such as `oem12.inf`.
+    Driver { inf: String },
 }
 
 /// What was kept so a removed target can be put back.
@@ -42,6 +44,8 @@ pub enum Backup {
     TaskXml { file: String },
     /// Where a PATH entry was, so it goes back to the same place.
     PathEntry { positions: Vec<usize> },
+    /// The exported driver package; `inf` is its INF file inside the batch.
+    Driver { inf: String },
 }
 
 /// What the safety rules need to know.
@@ -153,6 +157,12 @@ impl Guard {
                     return Err("Part of Windows".into());
                 }
                 self.check_excluded(&folder)
+            }
+            Target::Driver { inf } => {
+                if !is_published_inf(inf) {
+                    return Err("Only third-party driver packages (oem*.inf) can be removed".into());
+                }
+                Ok(())
             }
         }
     }
@@ -315,6 +325,16 @@ pub fn split_key(key: &str) -> Option<(&'static str, &str)> {
     (!sub.trim_matches('\\').is_empty()).then_some((hive, sub.trim_matches('\\')))
 }
 
+/// Windows publishes every third-party driver package as `oem<number>.inf`;
+/// its own packages have other names and are never touched.
+pub fn is_published_inf(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower
+        .strip_prefix("oem")
+        .and_then(|rest| rest.strip_suffix(".inf"))
+        .is_some_and(|n| !n.is_empty() && n.len() <= 6 && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// Folders and machine-wide registry keys need administrator rights.
 pub fn needs_admin(target: &Target) -> bool {
     match target {
@@ -325,7 +345,7 @@ pub fn needs_admin(target: &Target) -> bool {
         Target::RegistryKey { key } | Target::RegistryValue { key, .. } => {
             split_key(key).is_none_or(|(hive, _)| hive == "HKLM")
         }
-        Target::Service { .. } | Target::Task { .. } => true,
+        Target::Service { .. } | Target::Task { .. } | Target::Driver { .. } => true,
         Target::PathEntry { scope, .. } => scope == "machine",
     }
 }
@@ -341,6 +361,7 @@ pub fn describe(target: &Target) -> String {
         Target::PathEntry { scope, entry } => {
             format!("{} PATH: {entry}", if scope == "machine" { "System" } else { "User" })
         }
+        Target::Driver { inf } => format!("Driver package {inf}"),
     }
 }
 
@@ -653,8 +674,40 @@ mod imp {
                 write_path(&key, &next, vtype)?;
                 Ok((Backup::PathEntry { positions }, None))
             }
+            Target::Driver { inf } => {
+                let folder = dir.join("driver");
+                std::fs::create_dir_all(&folder)?;
+                run_tool("pnputil.exe", &["/export-driver", inf, &folder.to_string_lossy()])?;
+                let exported = exported_inf(&folder).ok_or(Error::Other("Windows didn't export the package".into()));
+                let removed = exported.and_then(|file| delete(target).map(|_| file));
+                match removed {
+                    Ok(file) => Ok((Backup::Driver { inf: file }, None)),
+                    Err(e) => {
+                        let _ = remove_path(&folder);
+                        Err(e)
+                    }
+                }
+            }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
         }
+    }
+
+    /// The package's INF inside an export, as a path relative to the item folder.
+    fn exported_inf(folder: &Path) -> Option<String> {
+        let parent = folder.parent()?;
+        walkdir::WalkDir::new(folder)
+            .max_depth(2)
+            .sort_by_file_name()
+            .into_iter()
+            .flatten()
+            .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("inf")))
+            .min_by_key(|e| e.depth())
+            .and_then(|e| {
+                e.path()
+                    .strip_prefix(parent)
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            })
     }
 
     const MACHINE_ENV: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
@@ -738,6 +791,8 @@ mod imp {
                 run_tool("sc.exe", &["delete", name]).map(|_| ())
             }
             Target::Task { path } => run_tool("schtasks.exe", &["/Delete", "/TN", path, "/F"]).map(|_| ()),
+            // Without /force, Windows refuses a package a device still uses.
+            Target::Driver { inf } => run_tool("pnputil.exe", &["/delete-driver", inf]).map(|_| ()),
             Target::PathEntry { scope, entry } => {
                 let (key, text, vtype) = read_path(scope)?;
                 let (next, _) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
@@ -790,6 +845,10 @@ mod imp {
                     Some(next) => write_path(&key, &next, vtype),
                     None => Ok(()),
                 }
+            }
+            // Back into the Driver Store; devices pick it up when they need it.
+            (Target::Driver { .. }, Backup::Driver { inf }) => {
+                run_tool("pnputil.exe", &["/add-driver", &dir.join(inf).to_string_lossy()]).map(|_| ())
             }
             _ => Err(Error::Other("This backup doesn't match the item".into())),
         }
@@ -973,5 +1032,16 @@ mod tests {
         assert_eq!(std::fs::read(original.join("new.txt")).unwrap(), b"new");
         assert_eq!(std::fs::read(batch.join("App/sub/a.txt")).unwrap(), b"hello");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_published_driver_packages() {
+        let g = guard();
+        let driver = |inf: &str| Target::Driver { inf: inf.into() };
+        assert!(g.check(&driver("oem12.inf")).is_ok());
+        assert!(g.check(&driver("OEM7.INF")).is_ok());
+        for bad in ["oem.inf", "nv_dispi.inf", "oem12.inf.bak", r"..\oem1.inf", "oem1a.inf", "machine.inf"] {
+            assert!(g.check(&driver(bad)).is_err(), "{bad}");
+        }
     }
 }

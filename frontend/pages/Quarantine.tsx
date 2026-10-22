@@ -16,6 +16,7 @@ const TARGET_ICON: Record<Target['kind'], IconName> = {
   service: 'cog',
   task: 'calendar',
   pathEntry: 'code',
+  driver: 'cpu',
 };
 
 function BatchCard({

@@ -1,5 +1,6 @@
 mod apps;
 mod cleanup;
+mod drivers;
 mod error;
 mod icons;
 mod leftovers;
@@ -50,8 +51,12 @@ pub fn run() {
             cleanup::scan_cleanup,
             cleanup::clean_caches,
             startup::list_startup,
+            startup::set_startup_enabled,
             services::list_services,
+            services::set_service_start,
             tasks::list_tasks,
+            tasks::set_task_enabled,
+            drivers::list_drivers,
             settings::get_settings,
             settings::save_settings,
             paths::storage_info,

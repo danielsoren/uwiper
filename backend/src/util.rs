@@ -236,6 +236,11 @@ pub fn run_tool(name: &str, args: &[&str]) -> crate::error::Result<String> {
     run_tool_with_env(name, args, &[])
 }
 
+#[cfg(not(windows))]
+pub fn run_tool(_name: &str, _args: &[&str]) -> crate::error::Result<String> {
+    Err(crate::error::Error::Unsupported)
+}
+
 /// `run_tool` with extra environment variables, for passing text that must
 /// not be parsed as part of a command (PowerShell scripts, for one).
 #[cfg(windows)]
@@ -248,7 +253,7 @@ pub fn run_tool_with_env(name: &str, args: &[&str], env: &[(&str, &str)]) -> cra
         .envs(env.iter().copied())
         .creation_flags(CREATE_NO_WINDOW)
         .output()?;
-    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_string();
+    let text = |bytes: &[u8]| console_text(bytes).trim().to_string();
     if output.status.success() {
         return Ok(text(&output.stdout));
     }
@@ -256,7 +261,8 @@ pub fn run_tool_with_env(name: &str, args: &[&str], env: &[(&str, &str)]) -> cra
         .into_iter()
         .find(|m| !m.is_empty())
         .unwrap_or_default();
-    if message.to_lowercase().contains("access is denied") {
+    let lower = message.to_lowercase();
+    if lower.contains("access is denied") || lower.contains("отказано в доступе") {
         return Err(crate::error::Error::NeedsAdmin);
     }
     Err(crate::error::Error::Other(if message.is_empty() {
@@ -264,6 +270,54 @@ pub fn run_tool_with_env(name: &str, args: &[&str], env: &[(&str, &str)]) -> cra
     } else {
         message
     }))
+}
+
+/// Console tools write in the OEM code page (866 on Russian Windows, for one),
+/// not UTF-8.
+#[cfg(windows)]
+fn console_text(bytes: &[u8]) -> String {
+    use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_OEMCP};
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    let Ok(len) = i32::try_from(bytes.len()) else {
+        return String::from_utf8_lossy(bytes).into_owned();
+    };
+    unsafe {
+        let wide_len = MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0);
+        if wide_len <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; wide_len as usize];
+        MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), wide_len);
+        String::from_utf16_lossy(&wide)
+    }
+}
+
+/// Text from a file Windows wrote: UTF-16 with or without a BOM, UTF-8, or an
+/// ANSI code page (whose non-ASCII letters come out as replacement marks).
+pub fn decode_text(bytes: &[u8]) -> String {
+    let utf16 = |data: &[u8], le: bool| {
+        let units: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|c| {
+                if le {
+                    u16::from_le_bytes([c[0], c[1]])
+                } else {
+                    u16::from_be_bytes([c[0], c[1]])
+                }
+            })
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, true),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, false),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        // ASCII text saved as UTF-16 without a BOM: every second byte is zero.
+        [_, 0, _, 0, ..] => utf16(bytes, true),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
 }
 
 /// Runs `f` on every item using a few threads; results keep the input order.
