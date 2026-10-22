@@ -22,7 +22,7 @@ function Steps({ step }: { step: Step }) {
           {i > 0 && <span className="h-px w-5 bg-line-2" />}
           <span
             className={cn(
-              'grid size-5 place-items-center rounded-full text-micro font-semibold',
+              'grid size-5 place-items-center rounded-full text-micro font-semibold leading-[normal] tabular-nums',
               i < at ? 'bg-good/18 text-good' : i === at ? 'bg-accent text-white' : 'bg-white/8 text-fg-4',
             )}
           >
@@ -63,7 +63,7 @@ const asLeftover = (i: TraceDraft['items'][number]): Leftover => ({
       ? "New, but it runs something the installer didn't add"
       : i.kind === 'driver' || i.kind === 'environment'
         ? 'New – Windows or another app may have added it'
-        : 'New, inside a place that was already there – another app may have made it',
+        : "New, but nothing ties it to this install – another app may have made it",
   confidence: i.sure ? 'high' : 'medium',
   sizeBytes: i.sizeBytes,
   modified: null,

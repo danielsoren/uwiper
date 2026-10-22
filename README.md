@@ -16,7 +16,7 @@
 <p align="center">
   UWiper runs an app's own uninstaller, then hunts down everything it left – folders, registry keys, services,<br>
   scheduled tasks, startup entries, shortcuts – and shows you the list before anything is touched.<br>
-  Everything goes to quarantine first, so one click brings it all back. Track an install,<br>
+  Removed things go to quarantine first, so they can be put back. Track an install,<br>
   and uninstalling the app later leaves nothing behind at all.
 </p>
 
@@ -36,14 +36,14 @@
 |  |  |
 | --- | --- |
 | 📦 **Install tracking** | Track an install, and UWiper notes everything the installer adds – folders, registry keys, services, tasks, shortcuts, drivers. Uninstalling the app later removes all of it. Snapshots hold names only, never contents. |
-| 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like. |
+| 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like – what the uninstaller itself removes isn't in quarantine. Edge and the runtimes other apps need stay while Windows components are protected. |
 | 🔎 **Leftovers, explained** | Every find says why it's there and how sure UWiper is: **High** – certainly the app's, **Medium** – named after it, **Low** – may be shared. You tick what goes. |
-| ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML, driver packages exported. Restore a whole batch in one click. Batches are deleted for good after 30 days (you choose). |
+| ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML, driver packages exported – each backed up and recorded before anything changes. Restore a batch in one click. Batches are deleted for good after 30 days (you choose). |
 | 👻 **Leftovers of apps long gone** | Folders and settings no installed app claims, apps still listed as installed whose files are gone, shortcuts and PATH entries pointing nowhere, startup entries, services and tasks whose programs are missing. Each with how sure UWiper is and when it last changed. |
 | ⚡ **Startup, services and tasks** | Switch startup entries and scheduled tasks on and off, and choose how services start – Automatic, delayed, Manual or Disabled. Windows' own stay read-only. |
 | 🧩 **Old drivers** | Every driver update leaves the previous version in the Driver Store. UWiper finds the older versions nothing uses any more – old GPU drivers alone can take gigabytes – and quarantines them. |
 | 🧹 **Junk and caches** | Temp files, Windows Update downloads, crash dumps, logs, the Recycle Bin, caches of every Chromium and Firefox browser, Telegram, Discord, Steam and other apps – plus any app cache found by folder name, Store apps included. Cookies, passwords and history are never touched. |
-| 🛡️ **Hard to break things with** | Windows and Microsoft components, shared folders, other apps' folders and your own «Never touch» list are always off limits. |
+| 🛡️ **Hard to break things with** | Windows and Microsoft components, shared folders, other apps' folders and your own «Never touch» list are always off limits. Only High finds are picked for you, everything is checked again right before it's removed, and nothing is cleaned through a link. |
 | 🎒 **Leaves no traces itself** | Fully portable: settings, quarantine, logs and even the WebView profile live next to the exe. Delete the folder and UWiper is gone. |
 
 ## 📸 A closer look
@@ -62,7 +62,7 @@
     <td width="50%"><img src="assets/screenshots/leftovers.webp" alt="Leftovers of apps that are gone"></td>
   </tr>
   <tr>
-    <td align="center"><sub><b>Quarantine</b> – put anything back in one click</sub></td>
+    <td align="center"><sub><b>Quarantine</b> – put things back in one click</sub></td>
     <td align="center"><sub><b>Leftovers</b> of apps that are long gone, with how sure UWiper is</sub></td>
   </tr>
   <tr>
@@ -93,7 +93,14 @@
 > The exe isn't code-signed yet, so SmartScreen may say «Windows protected your PC» – click **More info → Run anyway**. UWiper needs WebView2, which Windows 10 and 11 already have.
 
 > [!IMPORTANT]
-> UWiper removes things, and it's still a beta. Quarantine is on by default – keep it on while you try UWiper out.
+> UWiper removes things. Quarantine is on by default – keep it on, and look at what's ticked before you remove it, Low finds above all.
+
+## ♻️ What restoring brings back
+
+- **Files and folders** come back where they were. If something new is there by then, UWiper fills in what's missing and keeps the quarantined copies of the rest.
+- **Registry keys and values, services and scheduled tasks** come back unless the app was installed again meanwhile – then UWiper leaves the new ones alone and keeps the quarantined copy.
+- **Services** need a restart of Windows to run again. A service or task that ran under its own account with a saved password needs that password typed in again – Windows doesn't let anyone export it.
+- **Driver packages** go back into the Driver Store; Windows uses them when a device needs them.
 
 ## 🗺️ Roadmap
 
@@ -101,7 +108,8 @@
 - [x] **v0.2** – uninstall with a leftover scan, quarantine and restore
 - [x] **v0.3** – entries without an owner, junk and caches
 - [x] **v0.4** – startup, services, scheduled tasks and drivers: switch them on and off, remove old driver packages
-- [x] **v0.5** – install tracking: snapshot what an installer creates, for a perfect uninstall later ← *you are here*
+- [x] **v0.5** – install tracking: snapshot what an installer creates, for a perfect uninstall later
+- [x] **1.0** – a safety audit's findings fixed: stricter cleanup, rechecks before removal, a quarantine that records first ← *you are here*
 
 Ideas and bug reports are welcome in [Issues](https://github.com/danielsoren/uwiper/issues) 💬
 
@@ -129,7 +137,7 @@ backend/             Rust + Tauri
   src/targets.rs     removable things, safety rules, backup and restore
   src/quarantine.rs  quarantine batches
   src/cleanup.rs     caches: known ones, found by name or layout; cleaning
-  src/startup.rs     Run keys, Startup folders, switching them on and off
+  src/startup.rs     Run keys, Startup folders, app package startup tasks, switching them
   src/services.rs    services, their binaries and how they start
   src/tasks.rs       scheduled task XML under System32\Tasks, on and off
   src/drivers.rs     third-party driver packages and their older versions

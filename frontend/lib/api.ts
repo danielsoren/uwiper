@@ -46,6 +46,7 @@ export const api = {
   setServiceStart: (name: string, start: ServiceStart) => call<void>('set_service_start', { name, start }),
   setTaskEnabled: (name: string, enabled: boolean) => call<void>('set_task_enabled', { name, enabled }),
   getSettings: () => call<Settings>('get_settings'),
+  settingsNotice: () => call<string | null>('settings_notice'),
   saveSettings: (settings: Settings) => call<Settings>('save_settings', { settings }),
   storageInfo: () => call<StorageInfo>('storage_info'),
   restartAsAdmin: () => call<void>('restart_as_admin'),

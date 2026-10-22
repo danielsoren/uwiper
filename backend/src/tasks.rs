@@ -9,7 +9,9 @@ use tauri::State;
 use crate::error::{blocking, Error, Result};
 use crate::quarantine::settings_of;
 use crate::targets::Target;
-use crate::util::{decode_text, expand_env, program_state, resolve_executable, uses_per_user_vars};
+use crate::util::{
+    command_executable, decode_text, expand_env, program_state, resolve_executable, uses_per_user_vars, volume_root,
+};
 use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
@@ -19,7 +21,11 @@ pub struct TaskItem {
     folder: String,
     command: Option<String>,
     arguments: Option<String>,
+    /// The program it runs: the first one that's there, of all its actions.
     pub(crate) binary: Option<String>,
+    /// Every program its actions run, where UWiper can tell.
+    #[serde(skip)]
+    pub(crate) programs: Vec<String>,
     pub(crate) file_exists: Option<bool>,
     enabled: bool,
     triggers: String,
@@ -101,6 +107,29 @@ fn is_windows_author(author: &str) -> bool {
     a.starts_with("microsoft") || a.starts_with("$(@%systemroot%") || a.starts_with("$(@%windir%")
 }
 
+/// Where an action's program is, the way Task Scheduler finds it: a full
+/// path as it is, a relative one in its working directory, a bare name
+/// there or in Windows' folders and on PATH. `None` when that can't be told
+/// – a relative path without a full working directory.
+fn task_program(command: &str, dir: Option<&str>) -> Option<String> {
+    let exe = command_executable(command)?;
+    if volume_root(&exe).is_some() {
+        return Some(exe);
+    }
+    let dir = dir
+        .map(|d| expand_env(d.trim().trim_matches('"')))
+        .filter(|d| volume_root(d).is_some());
+    let in_dir = dir.map(|d| format!(r"{}\{}", d.trim_end_matches('\\'), exe.trim_start_matches(".\\")));
+    if exe.contains(['\\', '/']) {
+        return in_dir;
+    }
+    in_dir
+        .clone()
+        .filter(|p| Path::new(p).is_file())
+        .or_else(|| resolve_executable(&exe))
+        .or(in_dir)
+}
+
 fn trigger_label(tag: &str) -> &'static str {
     match tag {
         "LogonTrigger" => "At log on",
@@ -128,7 +157,15 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
             .filter(|t| !t.is_empty())
     };
 
-    let exec = doc.descendants().find(|n| is(n, "Exec"));
+    // A task can have up to 32 actions; COM handlers and the like run no file UWiper can check.
+    let actions: Vec<roxmltree::Node> = doc
+        .descendants()
+        .find(|n| is(n, "Actions"))
+        .map(|a| a.children().filter(|c| c.is_element()).collect())
+        .unwrap_or_default();
+    let execs: Vec<roxmltree::Node> = actions.iter().copied().filter(|a| is(a, "Exec")).collect();
+    let other_actions = actions.len() > execs.len();
+    let exec = execs.first().copied();
     let author = child_text(doc.descendants().find(|n| is(n, "RegistrationInfo")), "Author").unwrap_or_default();
     let settings = doc.descendants().find(|n| is(n, "Settings"));
     let enabled = child_text(settings, "Enabled").is_none_or(|v| v != "false");
@@ -150,17 +187,39 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
         .parent()
         .map(|p| p.to_string_lossy().replace('/', "\\"))
         .unwrap_or_default();
-    let binary = command.as_deref().and_then(resolve_executable);
+    // A task may run as another user, whose profile a per-user path points into.
+    let programs: Vec<Option<String>> = execs
+        .iter()
+        .map(|e| {
+            let command = child_text(Some(*e), "Command")?;
+            if uses_per_user_vars(&command) {
+                return None;
+            }
+            task_program(&command, child_text(Some(*e), "WorkingDirectory").as_deref())
+        })
+        .collect();
+    let states: Vec<Option<bool>> = programs.iter().map(|p| p.as_deref().and_then(program_state)).collect();
+    // Missing only when every action runs a program that's surely gone.
+    let file_exists = if states.contains(&Some(true)) {
+        Some(true)
+    } else if !other_actions && !states.is_empty() && states.iter().all(|s| *s == Some(false)) {
+        Some(false)
+    } else {
+        None
+    };
+    let binary = programs
+        .iter()
+        .zip(&states)
+        .find(|(_, s)| **s == Some(true))
+        .or_else(|| programs.iter().zip(&states).find(|(p, _)| p.is_some()))
+        .and_then(|(p, _)| p.clone());
+    let programs: Vec<String> = programs.into_iter().flatten().collect();
     Some(TaskItem {
         // Windows' own tasks also sit outside the Microsoft folder; their author says whose they are.
         is_windows: name.starts_with("Microsoft\\") || is_windows_author(&author),
-        // A task may run as another user, whose profile a per-user path points into.
-        file_exists: if command.as_deref().is_some_and(uses_per_user_vars) {
-            None
-        } else {
-            binary.as_deref().and_then(program_state)
-        },
+        file_exists,
         binary,
+        programs,
         command,
         arguments,
         enabled,
@@ -180,6 +239,20 @@ fn parse(bytes: &[u8], rel: &Path) -> Option<TaskItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_programs_the_way_task_scheduler_does() {
+        assert_eq!(
+            task_program(r#""C:\Tools\App\app.exe" --wake"#, None).as_deref(),
+            Some(r"C:\Tools\App\app.exe")
+        );
+        assert_eq!(
+            task_program(r"bin\app.exe", Some(r"C:\Tools\App\")).as_deref(),
+            Some(r"C:\Tools\App\bin\app.exe")
+        );
+        assert_eq!(task_program(r"bin\app.exe", None), None, "relative to what?");
+        assert_eq!(task_program(r"bin\app.exe", Some(r"..\x")), None);
+    }
 
     const TASK: &str = r#"<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -219,5 +292,23 @@ mod tests {
         assert!(task.is_windows);
         assert!(is_windows_author("Microsoft Corporation"));
         assert!(!is_windows_author("Google LLC"));
+    }
+
+    #[test]
+    fn a_task_is_broken_only_when_every_action_is() {
+        // A second action whose program is there (this test binary).
+        let here = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let two = TASK.replace(
+            "</Exec></Actions>",
+            &format!("</Exec><Exec><Command>{here}</Command></Exec></Actions>"),
+        );
+        let task = parse(two.as_bytes(), Path::new("Vendor/Two")).unwrap();
+        assert_ne!(task.file_exists, Some(false));
+        let com = TASK.replace(
+            "</Exec></Actions>",
+            "</Exec><ComHandler><ClassId>{00000000-0000-0000-0000-000000000000}</ClassId></ComHandler></Actions>",
+        );
+        let task = parse(com.as_bytes(), Path::new("Vendor/Com")).unwrap();
+        assert_eq!(task.file_exists, None);
     }
 }

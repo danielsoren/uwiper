@@ -76,8 +76,8 @@ export function Cleanup() {
             </Card>
 
             <Note>
-              Caches are deleted for good – apps rebuild them when needed. Cookies, passwords, history and offline downloads are
-              never touched. Files in use are skipped, so close your browsers first to clean their caches completely.
+              Caches are deleted for good – apps rebuild them when needed. Cookies, sign-ins, history, site data and offline downloads
+              are never touched, nor anything a link leads to. Close your browsers and apps first: what they have open can't be cleaned.
             </Note>
 
             {cleanupGroupsOf(items).map((g) => {

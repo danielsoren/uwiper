@@ -1,7 +1,7 @@
 {
   "name": "uwiper",
   "private": true,
-  "version": "0.5.0-beta.1",
+  "version": "1.0.0",
   "description": "Uninstall Windows apps completely and wipe every trace they leave – portable, quarantine first",
   "keywords": [
     "windows",

@@ -4,7 +4,7 @@ import { cn } from '../../lib/cn';
 import { formatBytes, formatDate, plural } from '../../lib/format';
 import type { InstalledApp } from '../../lib/types';
 import { useAppStore } from '../../store/useAppStore';
-import { Button } from '../../ui';
+import { Button, Callout } from '../../ui';
 import { AppTile } from './AppTile';
 import { UninstallDialog } from './UninstallDialog';
 
@@ -32,6 +32,10 @@ export function AppDetail({ app }: { app: InstalledApp }) {
   const [copied, setCopied] = useState(false);
   const [uninstalling, setUninstalling] = useState(false);
   const trace = useAppStore((s) => s.res.traces.data?.find((t) => t.appId === app.id));
+  const go = useAppStore((s) => s.go);
+  const protect = useAppStore((s) => s.settings?.safety.protectSystem ?? true);
+  // Windows' own components stay while protection is on.
+  const locked = !!app.component && protect;
   const command = app.quietUninstallString ?? app.uninstallString;
 
   const copy = () => {
@@ -86,10 +90,20 @@ export function AppDetail({ app }: { app: InstalledApp }) {
         )}
       </dl>
 
+      {locked && (
+        <Callout
+          message={`${app.component}. UWiper leaves it installed while Windows components are protected.`}
+          action="Settings"
+          onAction={() => go('settings')}
+        />
+      )}
+
       <div className="flex flex-wrap items-center gap-2.5">
-        <Button kind="danger" icon="trash" onClick={() => setUninstalling(true)}>
-          Uninstall completely
-        </Button>
+        {!locked && (
+          <Button kind="danger" icon="trash" onClick={() => setUninstalling(true)}>
+            Uninstall completely
+          </Button>
+        )}
         {app.installLocation && (
           <Button icon="folder" onClick={() => attempt(() => api.openFolder(app.installLocation!))}>
             Open folder

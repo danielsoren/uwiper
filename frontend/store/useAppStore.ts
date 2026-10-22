@@ -86,7 +86,8 @@ interface AppState {
   update: <K extends ResourceKey>(key: K, change: (data: Resources[K]) => Resources[K]) => void;
   /** Applies a change right away and saves it; a failed save rolls it back. */
   updateSettings: (change: (s: Settings) => Settings) => void;
-  notify: (text: string) => void;
+  /** Shows a toast for `ms` (4.5 s by default). */
+  notify: (text: string, ms?: number) => void;
   /** Runs a command and turns a failure into a toast. */
   attempt: (action: () => Promise<unknown>) => void;
   restartAsAdmin: () => void;
@@ -125,6 +126,8 @@ export const useAppStore = create<AppState>()((set, get) => {
       started = true;
       const env = api.environment().then((env) => set({ env }), (e) => get().notify(errorText(e)));
       const settings = api.getSettings().then((settings) => set({ settings }), (e) => get().notify(errorText(e)));
+      // Settings that couldn't be read, or a choice that changed with this version.
+      api.settingsNotice().then((text) => text && get().notify(text, 15000), () => undefined);
       // Settings shows these numbers, so measure them before the first screen.
       get().load('storage');
       // The sidebar shows whether an install is being tracked, and Apps which apps were.
@@ -168,10 +171,10 @@ export const useAppStore = create<AppState>()((set, get) => {
       );
     },
 
-    notify: (text) => {
+    notify: (text, ms = 4500) => {
       const id = Date.now() + Math.random();
       set((s) => ({ toasts: [...s.toasts, { id, text }] }));
-      setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), 4500);
+      setTimeout(() => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })), ms);
     },
 
     attempt: (action) => {

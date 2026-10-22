@@ -10,8 +10,8 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::error::{blocking, Result};
-use crate::targets::Guard;
-use crate::util::{canonical, dir_size, expand_env, is_within, parallel_map};
+use crate::targets::{self, Guard};
+use crate::util::{canonical, expand_env, fresh_time, is_within, parallel_map, pin_dir, pin_parents, Blocked, Pin};
 use crate::{log, AppState};
 
 #[derive(Serialize, Clone, Debug)]
@@ -36,8 +36,6 @@ enum Spec {
     File(&'static str),
     /// Files in a folder whose names start with a prefix.
     Prefixed(&'static str, &'static str),
-    /// Folders in a folder whose names start with a prefix.
-    DirsPrefixed(&'static str, &'static str),
     /// Files in a folder whose names end with a suffix, such as ".log".
     Ending(&'static str, &'static str),
     /// In every subfolder of a folder whose name starts with a prefix, these
@@ -45,6 +43,10 @@ enum Spec {
     Children(&'static str, &'static str, &'static [&'static str]),
     /// Cache folders of every profile in a Chromium "User Data" folder.
     Chromium(&'static str),
+    /// An app's embedded browser (CEF, WebView2): only its cache folders,
+    /// never the profile around them. With a prefix, every folder in the
+    /// first one whose name starts with it is such a browser.
+    WebView(&'static str, &'static str),
     /// `cache2` of every Firefox profile.
     Firefox(&'static str),
     /// The Recycle Bin on every drive.
@@ -66,13 +68,13 @@ const CHAT_MEDIA: &str = "Images and media from chats, downloaded again when ope
 
 #[rustfmt::skip]
 const DEFS: &[Def] = &[
-    Def { id: "temp", group: "windows", name: "Temporary files", description: "%TEMP% and Windows\\Temp", default_on: true,
+    Def { id: "temp", group: "windows", name: "Temporary files", description: "%TEMP% and Windows\\Temp – files changed in the last day stay", default_on: true,
         specs: &[Spec::Dir("%TEMP%"), Spec::Dir(r"%SystemRoot%\Temp")] },
-    Def { id: "windows-update", group: "windows", name: "Windows Update cache", description: "Downloaded packages for updates that are already installed", default_on: true,
+    Def { id: "windows-update", group: "windows", name: "Windows Update downloads", description: "Update packages Windows downloaded – only clean them when no update is waiting to install", default_on: false,
         specs: &[Spec::Dir(r"%SystemRoot%\SoftwareDistribution\Download")] },
     Def { id: "delivery-optimization", group: "windows", name: "Delivery Optimization", description: "Update files shared with other PCs", default_on: true,
         specs: &[Spec::Dir(r"%SystemRoot%\ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache")] },
-    Def { id: "crash-dumps", group: "windows", name: "Crash reports & memory dumps", description: "Windows Error Reporting, minidumps", default_on: true,
+    Def { id: "crash-dumps", group: "windows", name: "Crash reports & memory dumps", description: "Kept to find out why something crashed – nothing rebuilds them", default_on: false,
         specs: &[
             Spec::Dir(r"%ProgramData%\Microsoft\Windows\WER\ReportArchive"),
             Spec::Dir(r"%ProgramData%\Microsoft\Windows\WER\ReportQueue"),
@@ -175,12 +177,12 @@ const DEFS: &[Def] = &[
             Spec::Dir(r"%APPDATA%\Code\Code Cache"),
             Spec::Dir(r"%APPDATA%\Code\GPUCache"),
         ] },
-    Def { id: "steam", group: "apps", name: "Steam – web cache", description: "Store and community pages; games are kept", default_on: true,
-        specs: &[Spec::Dir(r"%LOCALAPPDATA%\Steam\htmlcache")] },
-    Def { id: "epic", group: "apps", name: "Epic Games Launcher – web cache", description: "Store pages; games are kept", default_on: true,
-        specs: &[Spec::DirsPrefixed(r"%LOCALAPPDATA%\EpicGamesLauncher\Saved", "webcache")] },
-    Def { id: "battlenet", group: "apps", name: "Battle.net – cache", description: "Launcher and store pages; games are kept", default_on: true,
-        specs: &[Spec::Dir(r"%LOCALAPPDATA%\Battle.net\BrowserCaches"), Spec::Dir(r"%LOCALAPPDATA%\Battle.net\Cache")] },
+    Def { id: "steam", group: "apps", name: "Steam – web cache", description: "Store and community pages; sign-in, cookies and games are kept", default_on: true,
+        specs: &[Spec::WebView(r"%LOCALAPPDATA%\Steam\htmlcache", "")] },
+    Def { id: "epic", group: "apps", name: "Epic Games Launcher – web cache", description: "Store pages; sign-in, cookies and games are kept", default_on: true,
+        specs: &[Spec::WebView(r"%LOCALAPPDATA%\EpicGamesLauncher\Saved", "webcache")] },
+    Def { id: "battlenet", group: "apps", name: "Battle.net – cache", description: "Launcher and store pages; sign-in and games are kept", default_on: true,
+        specs: &[Spec::WebView(r"%LOCALAPPDATA%\Battle.net\BrowserCaches", ""), Spec::Dir(r"%LOCALAPPDATA%\Battle.net\Cache")] },
     Def { id: "adobe-media", group: "apps", name: "Adobe media cache", description: "Premiere Pro and After Effects rebuild it when a project opens", default_on: false,
         specs: &[
             Spec::Dir(r"%APPDATA%\Adobe\Common\Media Cache Files"),
@@ -213,7 +215,6 @@ fn resolve(spec: &Spec) -> Vec<PathBuf> {
     match spec {
         Spec::Dir(p) | Spec::File(p) => existing(PathBuf::from(expand_env(p))).into_iter().collect(),
         Spec::Prefixed(dir, prefix) => entries_where(dir, false, |name| name.starts_with(&prefix.to_lowercase())),
-        Spec::DirsPrefixed(dir, prefix) => entries_where(dir, true, |name| name.starts_with(&prefix.to_lowercase())),
         Spec::Ending(dir, suffix) => entries_where(dir, false, |name| name.ends_with(&suffix.to_lowercase())),
         Spec::Children(root, prefix, subs) => subdirs(Path::new(&expand_env(root)))
             .into_iter()
@@ -229,6 +230,11 @@ fn resolve(spec: &Spec) -> Vec<PathBuf> {
             })
             .collect(),
         Spec::Chromium(user_data) => chromium_caches(Path::new(&expand_env(user_data))),
+        Spec::WebView(dir, "") => webview_caches(Path::new(&expand_env(dir))),
+        Spec::WebView(dir, prefix) => entries_where(dir, true, |name| name.starts_with(&prefix.to_lowercase()))
+            .iter()
+            .flat_map(|d| webview_caches(d))
+            .collect(),
         Spec::Firefox(profiles) => subdirs(Path::new(&expand_env(profiles)))
             .into_iter()
             .filter_map(|p| existing(p.join("cache2")))
@@ -237,19 +243,112 @@ fn resolve(spec: &Spec) -> Vec<PathBuf> {
     }
 }
 
-fn measure_paths(paths: &[PathBuf]) -> (u64, u64) {
-    let (mut size_bytes, mut file_count) = (0, 0);
-    for p in paths {
-        if p.is_file() {
-            size_bytes += p.metadata().map(|m| m.len()).unwrap_or(0);
-            file_count += 1;
-        } else {
-            let (bytes, files) = dir_size(p);
-            size_bytes += bytes;
-            file_count += files;
+/// What cleaning leaves alone, so measuring counts only what goes.
+struct Rules<'a> {
+    own: &'a [String],
+    /// Files changed after this stay (Temp: what's in use today).
+    keep_newer_than: Option<std::time::SystemTime>,
+}
+
+impl Rules<'_> {
+    fn for_category<'a>(id: &str, own: &'a [String]) -> Rules<'a> {
+        Rules {
+            own,
+            keep_newer_than: (id == "temp")
+                .then(|| std::time::SystemTime::now() - std::time::Duration::from_secs(KEEP_RECENT_TEMP_SECS)),
         }
     }
-    (size_bytes, file_count)
+
+    /// Links, profile data, Office's opened attachments and UWiper's own folders.
+    fn skips(&self, path: &Path, meta: &std::fs::Metadata) -> bool {
+        let name = name_of(path).to_lowercase();
+        is_link(meta)
+            || PROFILE_DATA.contains(&name.as_str())
+            || ["content.outlook", "content.mso"].contains(&name.as_str())
+            || is_own(path, self.own)
+    }
+
+    /// Made or written after the cutoff: an installer unpacking right now,
+    /// or a running program's unpacked files, keep their old write times.
+    fn too_new(&self, meta: &std::fs::Metadata) -> bool {
+        self.keep_newer_than
+            .is_some_and(|cutoff| fresh_time(meta).is_none_or(|t| t > cutoff))
+    }
+}
+
+/// Temporary files changed within the last day may belong to something running.
+const KEEP_RECENT_TEMP_SECS: u64 = 24 * 3600;
+
+/// A link or junction (any reparse point): it may lead anywhere.
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    meta.file_type().is_symlink()
+}
+
+/// Pins the folders on the way to a path to clean, so none of them can be
+/// swapped for a link while it's cleaned. Links at or above the user's and
+/// Windows' own folders are fine; below them, cleaning could reach anywhere.
+fn reach(path: &Path) -> std::result::Result<Vec<Pin>, Blocked> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| is_link(&m)) {
+        return Err(Blocked::Link);
+    }
+    pin_parents(path)
+}
+
+/// A folder to clean that holds the user's own files: a drive root, the
+/// profile or one of its folders, or anything holding one – where %TEMP%
+/// points when it's set wrong. Cleaning can't be undone, so it's refused.
+fn holds_user_files(path: &Path) -> bool {
+    let p = canonical(&path.to_string_lossy());
+    path.parent().is_none()
+        || p.trim_end_matches('\\').len() <= 2
+        || targets::shared_folders(false)
+            .iter()
+            .any(|f| is_within(&canonical(f), &p))
+}
+
+fn measure_dir(dir: &Path, rules: &Rules, total: &mut (u64, u64)) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if rules.skips(&path, &meta) {
+            continue;
+        }
+        if meta.is_dir() {
+            measure_dir(&path, rules, total);
+        } else if !rules.too_new(&meta) {
+            total.0 += meta.len();
+            total.1 += 1;
+        }
+    }
+}
+
+fn measure_paths(paths: &[PathBuf], rules: &Rules) -> (u64, u64) {
+    let mut total = (0, 0);
+    for p in paths {
+        let Ok(meta) = std::fs::symlink_metadata(p) else {
+            continue;
+        };
+        if holds_user_files(p) || reach(p).is_err() || rules.skips(p, &meta) {
+            continue;
+        }
+        if meta.is_dir() {
+            measure_dir(p, rules, &mut total);
+        } else if !rules.too_new(&meta) {
+            total.0 += meta.len();
+            total.1 += 1;
+        }
+    }
+    total
 }
 
 fn measure(def: &Def) -> Option<CleanupItem> {
@@ -272,7 +371,7 @@ fn measure(def: &Def) -> Option<CleanupItem> {
     if paths.is_empty() {
         return None;
     }
-    let (size_bytes, file_count) = measure_paths(&paths);
+    let (size_bytes, file_count) = measure_paths(&paths, &Rules::for_category(def.id, &[]));
     Some(item(size_bytes, file_count, paths))
 }
 
@@ -295,6 +394,60 @@ const CHROMIUM_CACHES: [&str; 8] = [
 /// Folders a cache search never walks into: they hold code or environments.
 const NEVER_INSIDE: [&str; 6] = ["site-packages", "node_modules", "virtualenvs", ".venv", "venv", "lib"];
 
+/// What browsers and embedded browsers keep in a profile: sign-ins, cookies,
+/// history, site data, settings. Never cleaned, whichever category a folder
+/// comes from.
+const PROFILE_DATA: &[&str] = &[
+    "cookies",
+    "cookies-journal",
+    "network",
+    "history",
+    "history-journal",
+    "login data",
+    "login data-journal",
+    "login data for account",
+    "web data",
+    "web data-journal",
+    "local storage",
+    "session storage",
+    "indexeddb",
+    "databases",
+    "service worker",
+    "preferences",
+    "secure preferences",
+    "local state",
+    "bookmarks",
+    "favicons",
+    "top sites",
+    "extensions",
+    "extension state",
+    "local extension settings",
+    "sync extension settings",
+    "managed extension settings",
+    "shared_proto_db",
+    "sessions",
+    "current session",
+    "current tabs",
+    "last session",
+    "last tabs",
+    "visited links",
+    "storage",
+    "file system",
+    "webstorage",
+    "transportsecurity",
+    "network persistent state",
+    "trust tokens",
+    "sync data",
+];
+
+fn holds_profile_data(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| PROFILE_DATA.contains(&e.file_name().to_string_lossy().to_lowercase().as_str()))
+    })
+}
+
 /// A Chromium cache folder: one of the names above, or a "Cache" with
 /// Chromium's layout inside.
 fn is_chromium_cache(dir: &Path) -> bool {
@@ -304,7 +457,7 @@ fn is_chromium_cache(dir: &Path) -> bool {
 }
 
 /// Folder names apps use for caches they rebuild.
-const CACHE_NAMES: [&str; 13] = [
+const CACHE_NAMES: [&str; 12] = [
     "cache",
     "caches",
     "code cache",
@@ -317,7 +470,6 @@ const CACHE_NAMES: [&str; 13] = [
     "shadercache",
     "cacheddata",
     "media_cache",
-    "htmlcache",
 ];
 
 /// Folders in AppData that aren't one app's: Windows' own, packaged apps,
@@ -430,6 +582,31 @@ fn chromium_caches(user_data: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The cache folders of an embedded browser: next to its profiles and in
+/// each of them, up to two levels down.
+fn webview_caches(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut walker = walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter();
+    while let Some(Ok(entry)) = walker.next() {
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        // A "Cache" that holds a profile's data is a profile, not a cache.
+        if (is_chromium_cache(path) || name_of(path).eq_ignore_ascii_case("cache")) && !holds_profile_data(path) {
+            out.push(path.to_path_buf());
+            walker.skip_current_dir();
+        } else if PROFILE_DATA.contains(&name_of(path).to_lowercase().as_str()) {
+            walker.skip_current_dir();
+        }
+    }
+    out
+}
+
 /// Cache folders, by name, up to `depth` levels below `dir`.
 fn cache_folders(dir: &Path, depth: usize) -> Vec<PathBuf> {
     let mut paths = Vec::new();
@@ -442,6 +619,11 @@ fn cache_folders(dir: &Path, depth: usize) -> Vec<PathBuf> {
     while let Some(Ok(entry)) = walker.next() {
         let path = entry.path();
         if entry.file_type().is_dir() && CACHE_NAMES.contains(&name_of(path).to_lowercase().as_str()) {
+            // A browser profile named "Cache" holds sign-ins and cookies: only
+            // the caches inside it count, found further down.
+            if holds_profile_data(path) {
+                continue;
+            }
             // Poetry and others keep environments inside "cache".
             if !NEVER_INSIDE.iter().any(|n| path.join(n).exists()) {
                 paths.push(path.to_path_buf());
@@ -595,7 +777,9 @@ pub async fn scan_cleanup(state: State<'_, AppState>) -> Result<Vec<CleanupItem>
             d.paths.retain(|p| !guard.is_excluded(&p.to_string_lossy()));
         }
         detected.retain(|d| !d.paths.is_empty());
-        let sizes = parallel_map(&detected, |d| measure_paths(&d.paths));
+        let sizes = parallel_map(&detected, |d| {
+            measure_paths(&d.paths, &Rules::for_category(&d.id, &guard.own))
+        });
         for (d, (size_bytes, file_count)) in detected.into_iter().zip(sizes) {
             if size_bytes < d.min_bytes {
                 continue;
@@ -623,10 +807,21 @@ pub struct CleanReport {
     freed_bytes: u64,
     /// Files that were in use, typically by a running browser.
     skipped_files: u64,
+    /// Files Windows wouldn't let UWiper delete (no access, read-only).
+    denied_files: u64,
+    /// Files that couldn't be deleted for another reason.
+    failed_files: u64,
+    /// Folders left alone because they lead through a link or junction.
+    skipped_links: u64,
+    /// Folders UWiper couldn't open.
+    unreadable_folders: u64,
+    /// Folders to clean that hold the user's own files (%TEMP% set to the
+    /// profile, say), left alone.
+    refused: Vec<String>,
 }
 
 /// Deletes the contents of the chosen cache categories. Folders themselves
-/// stay, and files in use are skipped.
+/// stay; links, profile data and files Windows won't let go of are skipped.
 #[tauri::command]
 pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Result<CleanReport> {
     let settings = state.settings.lock().unwrap().clone();
@@ -636,7 +831,7 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
         // UWiper may run from inside %TEMP% (an opened zip) or keep its data there.
         let guard = Guard::new(&settings);
         let own = guard.own.clone();
-        let mut jobs: Vec<(String, Vec<PathBuf>)> = Vec::new();
+        let mut jobs: Vec<(String, &str, Vec<PathBuf>)> = Vec::new();
         for def in DEFS.iter().filter(|d| ids.iter().any(|id| id == d.id)) {
             if def.specs.iter().any(|s| matches!(s, Spec::RecycleBin)) {
                 let (bytes, _) = imp::recycle_bin();
@@ -646,26 +841,67 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
                 }
                 continue;
             }
-            jobs.push((def.name.to_string(), def.specs.iter().flat_map(resolve).collect()));
+            jobs.push((
+                def.name.to_string(),
+                def.id,
+                def.specs.iter().flat_map(resolve).collect(),
+            ));
         }
-        if ids.iter().any(|id| id.starts_with("found:")) {
-            for d in detect(&known_paths(), &own).into_iter().filter(|d| ids.contains(&d.id)) {
-                jobs.push((d.name, d.paths));
-            }
+        let found: Vec<Detected> = if ids.iter().any(|id| id.starts_with("found:")) {
+            detect(&known_paths(), &own)
+                .into_iter()
+                .filter(|d| ids.contains(&d.id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for d in &found {
+            jobs.push((d.name.clone(), d.id.as_str(), d.paths.clone()));
         }
-        for (name, paths) in jobs {
+        for (name, id, paths) in jobs {
             let before = report.freed_bytes;
+            let rules = Rules::for_category(id, &own);
             for path in paths {
-                if is_own(&path, &own) || guard.is_excluded(&path.to_string_lossy()) {
+                if guard.is_excluded(&path.to_string_lossy()) {
                     continue;
                 }
-                if path.is_dir() {
-                    empty_dir(&path, &own, &mut report);
-                } else if let Ok(meta) = std::fs::metadata(&path) {
-                    remove_file(&path, meta.len(), &mut report);
+                if holds_user_files(&path) {
+                    lines.push(format!("  left alone {} – it holds your own files", path.display()));
+                    report.refused.push(path.to_string_lossy().into_owned());
+                    continue;
+                }
+                // Held until it's cleaned.
+                let _pins = match reach(&path) {
+                    Ok(pins) => pins,
+                    Err(Blocked::Link) => {
+                        report.skipped_links += 1;
+                        continue;
+                    }
+                    // Nothing to clean, or nothing the scan could measure either.
+                    Err(Blocked::Gone | Blocked::Unreadable) => continue,
+                };
+                let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if rules.skips(&path, &meta) {
+                    continue;
+                }
+                if meta.is_dir() {
+                    empty_dir(&path, &rules, &mut report, true);
+                } else if !rules.too_new(&meta) {
+                    remove_file(&path, &meta, &mut report);
                 }
             }
             lines.push(format!("  {name} – {} bytes", report.freed_bytes - before));
+        }
+        if report.skipped_links > 0 {
+            lines.push(format!(
+                "  {} folders skipped: they lead through a link",
+                report.skipped_links
+            ));
+        }
+        if report.unreadable_folders > 0 {
+            lines.push(format!("  {} folders couldn't be opened", report.unreadable_folders));
         }
         log::write(&settings, &lines);
         Ok(report)
@@ -673,10 +909,42 @@ pub async fn clean_caches(state: State<'_, AppState>, ids: Vec<String>) -> Resul
     .await
 }
 
-fn remove_file(path: &Path, len: u64, report: &mut CleanReport) {
-    match std::fs::remove_file(path) {
-        Ok(()) => report.freed_bytes += len,
-        Err(_) => report.skipped_files += 1,
+fn remove_file(path: &Path, meta: &std::fs::Metadata, report: &mut CleanReport) {
+    let mut result = std::fs::remove_file(path);
+    // Read-only files go once the flag is cleared; it's put back if they still don't.
+    let denied = |r: &std::io::Result<()>| {
+        r.as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+    };
+    if denied(&result) && meta.permissions().readonly() {
+        let mut writable = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        writable.set_readonly(false);
+        if std::fs::set_permissions(path, writable).is_ok() {
+            result = std::fs::remove_file(path);
+            if result.is_err() {
+                let _ = std::fs::set_permissions(path, meta.permissions());
+            }
+        }
+    }
+    let sharing = |e: &std::io::Error| matches!(e.raw_os_error(), Some(32 | 33));
+    match result {
+        Ok(()) => report.freed_bytes += meta.len(),
+        // Sharing and lock violations: an app has it open.
+        Err(e) if sharing(&e) => report.skipped_files += 1,
+        // A running program can't be deleted either, but Windows calls that
+        // "access denied"; it can't be opened for writing then.
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(path)
+                    .is_err_and(|e| sharing(&e)) =>
+        {
+            report.skipped_files += 1
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => report.denied_files += 1,
+        Err(_) => report.failed_files += 1,
     }
 }
 
@@ -686,8 +954,25 @@ fn is_own(path: &Path, own: &[String]) -> bool {
     own.iter().any(|dir| is_within(&p, dir))
 }
 
-fn empty_dir(dir: &Path, own: &[String], report: &mut CleanReport) {
+/// Deletes what's in a folder, the folder held open meanwhile so it can't be
+/// swapped for a link half-way. A folder that can't be opened is counted,
+/// unless it's the one to clean itself: the scan couldn't measure it either.
+fn empty_dir(dir: &Path, rules: &Rules, report: &mut CleanReport, top: bool) {
+    // Held until the folder is done.
+    let _pin = match pin_dir(dir) {
+        Ok(pin) => pin,
+        Err(Blocked::Link) => {
+            report.skipped_links += 1;
+            return;
+        }
+        Err(Blocked::Gone) => return,
+        Err(Blocked::Unreadable) => {
+            report.unreadable_folders += u64::from(!top);
+            return;
+        }
+    };
     let Ok(entries) = std::fs::read_dir(dir) else {
+        report.unreadable_folders += u64::from(!top);
         return;
     };
     for entry in entries.flatten() {
@@ -695,18 +980,17 @@ fn empty_dir(dir: &Path, own: &[String], report: &mut CleanReport) {
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
         };
-        // Links and junctions may lead anywhere: leave them alone. Outlook
-        // and Office keep opened attachments in the internet cache.
-        let keep = ["content.outlook", "content.mso"].contains(&name_of(&path).to_lowercase().as_str());
-        if meta.file_type().is_symlink() || keep || is_own(&path, own) {
+        if rules.skips(&path, &meta) {
             continue;
         }
         if meta.is_dir() {
-            empty_dir(&path, own, report);
-            // Succeeds only once it's empty.
-            let _ = std::fs::remove_dir(&path);
-        } else {
-            remove_file(&path, meta.len(), report);
+            empty_dir(&path, rules, report, false);
+            // Succeeds only once it's empty; one made today stays.
+            if !rules.too_new(&meta) {
+                let _ = std::fs::remove_dir(&path);
+            }
+        } else if !rules.too_new(&meta) {
+            remove_file(&path, &meta, report);
         }
     }
 }
@@ -844,17 +1128,59 @@ mod tests {
         std::fs::create_dir_all(&keep).unwrap();
         std::fs::write(keep.join("settings.toml"), b"x").unwrap();
         let own = vec![canonical(&keep.to_string_lossy())];
+        // A browser profile caught in a cache folder keeps its sign-ins.
+        std::fs::create_dir_all(dir.join("sub/Network")).unwrap();
+        std::fs::write(dir.join("sub/Network/Cookies"), b"c").unwrap();
+        std::fs::write(dir.join("sub/History"), b"h").unwrap();
         let mut report = CleanReport::default();
-        empty_dir(&dir, &own, &mut report);
+        empty_dir(&dir, &Rules::for_category("t", &own), &mut report, true);
         assert_eq!(report.freed_bytes, 15);
         assert_eq!(report.skipped_files, 0);
         assert!(dir.is_dir());
         assert_eq!(
             std::fs::read_dir(&dir).unwrap().count(),
-            1,
-            "only UWiper's own folder is left"
+            2,
+            "UWiper's own folder and the folder with profile data are left"
         );
         assert!(keep.join("settings.toml").exists());
+        assert!(dir.join("sub/Network/Cookies").exists() && dir.join("sub/History").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn embedded_browsers_give_only_their_caches() {
+        let dir = std::env::temp_dir().join(format!("uwiper-cef-{}", std::process::id()));
+        for sub in [
+            "GPUCache",
+            "Default/Cache/Cache_Data",
+            "Default/Code Cache/js",
+            "Default/Network",
+            "Default/Local Storage",
+        ] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("Default/Network/Cookies"), b"c").unwrap();
+        std::fs::write(dir.join("Default/History"), b"h").unwrap();
+        let mut found: Vec<String> = webview_caches(&dir)
+            .iter()
+            .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        found.sort();
+        assert_eq!(found, ["Default/Cache", "Default/Code Cache", "GPUCache"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn never_cleans_through_a_link() {
+        let dir = std::env::temp_dir().join(format!("uwiper-link-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("valuable")).unwrap();
+        std::fs::write(dir.join("valuable/keep.txt"), b"k").unwrap();
+        std::os::unix::fs::symlink(dir.join("valuable"), dir.join("Cache")).unwrap();
+        assert_eq!(reach(&dir.join("Cache")).err(), Some(Blocked::Link));
+        assert_eq!(reach(&dir.join("Cache").join("inner")).err(), Some(Blocked::Link));
+        assert!(reach(&dir.join("valuable")).is_ok());
+        assert!(holds_user_files(Path::new("/")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

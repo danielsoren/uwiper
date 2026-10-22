@@ -42,6 +42,12 @@ pub struct Leftover {
     modified: Option<u64>,
     needs_admin: bool,
     target: Target,
+    /// What it looked like at the scan, checked again before it's removed.
+    check: Option<String>,
+    /// What was gone when it was offered (its program, its shortcut's
+    /// target): should it come back, the find is stale.
+    #[serde(skip)]
+    gone: Vec<String>,
 }
 
 #[tauri::command]
@@ -284,7 +290,26 @@ impl Found {
             modified,
             needs_admin,
             target,
+            check: None,
+            gone: Vec::new(),
         });
+    }
+
+    /// Like `add`, for something offered because `gone` is gone: it's
+    /// checked again right before removing.
+    pub(crate) fn add_gone(
+        &mut self,
+        kind: &'static str,
+        target: Target,
+        reason: &str,
+        confidence: &'static str,
+        gone: Vec<String>,
+    ) {
+        let before = self.items.len();
+        self.add(kind, target, reason, confidence);
+        if let Some(item) = self.items.get_mut(before) {
+            item.gone = gone;
+        }
     }
 
     pub(crate) fn add_path(&mut self, path: &Path, reason: &str, confidence: &'static str) {
@@ -308,35 +333,66 @@ impl Found {
         );
     }
 
-    /// Drops finds that sit inside a folder that is already on the list,
-    /// measures folders and puts the surest finds first.
+    /// Of finds inside one another keeps one, measures folders and puts the
+    /// surest finds first.
     pub(crate) fn finish(mut self) -> Vec<Leftover> {
-        let folders: Vec<String> = self
-            .items
-            .iter()
-            .filter(|i| i.kind == "folder")
-            .map(|i| i.label.clone())
-            .collect();
-        self.items.retain(|item| match &item.target {
-            Target::Path { path } => !folders.iter().any(|f| f != path && is_within(path, f)),
-            _ => true,
-        });
-        let stats = parallel_map(&self.items, |item| match &item.target {
-            Target::Path { path } => {
-                let (bytes, _, newest) = dir_stats(Path::new(path));
-                (Some(bytes), newest)
-            }
-            _ => (None, None),
-        });
-        for (item, (size, newest)) in self.items.iter_mut().zip(stats) {
-            item.size_bytes = size;
-            item.modified = item.modified.or(newest);
-        }
         let rank = |c: &str| match c {
             "high" => 0,
             "medium" => 1,
             _ => 2,
         };
+        // Removing a folder or key changes whatever holds it, and removing
+        // the outer one takes the inner one along, so only one of them stays:
+        // the outer one, unless an inner one is surer.
+        let containers: Vec<(String, u8)> = self
+            .items
+            .iter()
+            .filter_map(|i| match &i.target {
+                Target::Path { path } if i.kind == "folder" => Some((path.clone(), rank(i.confidence))),
+                Target::RegistryKey { key } => Some((key.clone(), rank(i.confidence))),
+                _ => None,
+            })
+            .collect();
+        let surer_inside = |outer: &str, level: u8| {
+            containers
+                .iter()
+                .any(|(c, r)| norm_path(c) != norm_path(outer) && is_within(c, outer) && *r < level)
+        };
+        self.items.retain(|item| {
+            let (me, container) = match &item.target {
+                Target::Path { path } => (path, item.kind == "folder"),
+                Target::RegistryKey { key } => (key, true),
+                _ => return true,
+            };
+            let level = rank(item.confidence);
+            if container && surer_inside(me, level) {
+                return false;
+            }
+            !containers
+                .iter()
+                .any(|(c, r)| norm_path(c) != norm_path(me) && is_within(me, c) && *r <= level && !surer_inside(c, *r))
+        });
+        let stats = parallel_map(&self.items, |item| match &item.target {
+            Target::Path { path } => {
+                let stats = dir_stats(Path::new(path));
+                (Some(stats.bytes), stats.newest, Some(targets::path_fingerprint(&stats)))
+            }
+            target => (None, None, targets::fingerprint(target)),
+        });
+        let saves = parallel_map(&self.items, |item| match &item.target {
+            Target::Path { path } if item.kind == "folder" => holds_saved_games(Path::new(path)),
+            _ => false,
+        });
+        for ((item, (size, newest, check)), saves) in self.items.iter_mut().zip(stats).zip(saves) {
+            item.size_bytes = size;
+            item.check = targets::with_gone(check, &item.gone);
+            item.modified = item.modified.or(newest);
+            // Saved games are never a sure thing to remove.
+            if saves {
+                item.confidence = "low";
+                item.reason.push_str(" – it holds saved games");
+            }
+        }
         self.items
             .sort_by_key(|i| (rank(i.confidence), i.kind, i.label.to_lowercase()));
         self.items
@@ -405,17 +461,68 @@ fn data_roots(deep: bool) -> Vec<(PathBuf, &'static str)> {
         .collect()
 }
 
-pub(crate) fn shortcut_dirs() -> Vec<(PathBuf, usize)> {
+/// Where shortcuts live, how deep to look, and whether folders there can be
+/// an app's: Start menu folders are, but a folder on the Desktop is the
+/// user's own, whatever its name.
+pub(crate) fn shortcut_dirs() -> Vec<(PathBuf, usize, bool)> {
     [
-        (r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 2),
-        (r"%ProgramData%\Microsoft\Windows\Start Menu\Programs", 2),
-        (r"%USERPROFILE%\Desktop", 1),
-        (r"%PUBLIC%\Desktop", 1),
+        (r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 2, true),
+        (r"%ProgramData%\Microsoft\Windows\Start Menu\Programs", 2, true),
+        (r"%USERPROFILE%\Desktop", 1, false),
+        (r"%PUBLIC%\Desktop", 1, false),
     ]
     .into_iter()
-    .map(|(p, depth)| (PathBuf::from(expand_env(p)), depth))
-    .filter(|(p, _)| !p.to_string_lossy().contains('%'))
+    .map(|(p, depth, folders)| (PathBuf::from(expand_env(p)), depth, folders))
+    .filter(|(p, _, _)| !p.to_string_lossy().contains('%'))
     .collect()
+}
+
+/// A Start menu folder holding nothing but shortcuts (and desktop.ini).
+fn only_shortcuts(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .max_depth(3)
+        .follow_links(false)
+        .into_iter()
+        .all(|e| {
+            e.is_ok_and(|e| {
+                let name = e.file_name().to_string_lossy().to_lowercase();
+                e.file_type().is_dir() || name.ends_with(".lnk") || name.ends_with(".url") || name == "desktop.ini"
+            })
+        })
+}
+
+/// Folder and file names games keep their saves under.
+const SAVE_DIRS: [&str; 8] = [
+    "savegames",
+    "savegame",
+    "saves",
+    "save",
+    "savedgames",
+    "saved games",
+    "savedata",
+    "savefiles",
+];
+const SAVE_FILES: [&str; 5] = ["sav", "save", "savegame", "sl2", "ess"];
+
+/// True when a folder holds saved games, a few levels down. Nothing rebuilds
+/// those, whoever made the folder.
+pub(crate) fn holds_saved_games(dir: &Path) -> bool {
+    walkdir::WalkDir::new(dir)
+        .min_depth(1)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .take(20_000)
+        .flatten()
+        .any(|e| {
+            let name = e.file_name().to_string_lossy().to_lowercase();
+            if e.file_type().is_dir() {
+                SAVE_DIRS.contains(&name.as_str())
+            } else {
+                name.rsplit_once('.').is_some_and(|(_, ext)| SAVE_FILES.contains(&ext))
+            }
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -513,7 +620,7 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     }
 
     if look.shortcuts {
-        for (dir, depth) in shortcut_dirs() {
+        for (dir, depth, folders) in shortcut_dirs() {
             for entry in walkdir::WalkDir::new(&dir)
                 .min_depth(1)
                 .max_depth(depth)
@@ -524,10 +631,19 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
                 let name = file_name(path);
                 let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s).to_string();
                 if entry.file_type().is_dir() {
-                    if let Some(level) = names.level(&name, "medium") {
-                        found.add_path(path, "Start menu folder for the app", level);
+                    if !folders {
+                        continue;
+                    }
+                    // Taken whole only when it holds nothing but shortcuts.
+                    let (suffix, cap) = if only_shortcuts(path) {
+                        ("", "medium")
+                    } else {
+                        (" – it holds more than shortcuts", "low")
+                    };
+                    if let Some(level) = names.level(&name, cap) {
+                        found.add_path(path, &format!("Start menu folder for the app{suffix}"), level);
                     } else if !publisher_shared && names.is_publisher(&name) {
-                        found.add_path(path, "Start menu folder of the app's publisher", "medium");
+                        found.add_path(path, &format!("Start menu folder of the app's publisher{suffix}"), cap);
                     }
                     continue;
                 }
@@ -553,8 +669,11 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
     if look.files || look.registry {
         for item in crate::startup::list().unwrap_or_default() {
             let program = item.target.as_deref().unwrap_or_default();
+            let Some(removal) = item.removal else {
+                continue;
+            };
             if !item.is_windows && inside_install(program) && !found.guard.is_excluded(program) {
-                found.add("startup", item.removal, "Starts the removed app with Windows", "high");
+                found.add("startup", removal, "Starts the removed app with Windows", "high");
             }
         }
     }
@@ -627,11 +746,11 @@ pub fn scan(settings: &Settings, app: &AppRef) -> Result<Vec<Leftover>> {
 
     if look.tasks {
         for task in crate::tasks::list().unwrap_or_default() {
-            let program = task.binary.as_deref().unwrap_or_default();
-            if task.is_windows || (!program.is_empty() && found.guard.is_excluded(program)) {
+            if task.is_windows || task.programs.iter().any(|p| found.guard.is_excluded(p)) {
                 continue;
             }
-            if inside_install(program) {
+            // Any of its actions may be the app's: an updater after a check, say.
+            if task.programs.iter().any(|p| inside_install(p)) {
                 found.add("task", task.removal, "Runs a program from the app's folder", "high");
             } else if let Some(level) = task.name.split('\\').find_map(|part| names.level(part, "medium")) {
                 found.add("task", task.removal, "Named after the app", level);
@@ -681,6 +800,42 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_one_of_finds_inside_one_another() {
+        let guard = Guard {
+            protected: Vec::new(),
+            own: Vec::new(),
+            start_menus: Vec::new(),
+            protect_system: true,
+            exclusions: Vec::new(),
+        };
+        let key = |k: &str| Target::RegistryKey { key: k.into() };
+        let mut found = Found::new(guard, Vec::new(), false);
+        found.add(
+            "registry",
+            key(r"HKCU\Software\Vendor"),
+            "The publisher's settings",
+            "low",
+        );
+        found.add(
+            "registry",
+            key(r"HKCU\Software\Vendor\App"),
+            "The app's settings",
+            "high",
+        );
+        found.add("registry", key(r"HKCU\Software\Other"), "Named after the app", "high");
+        found.add(
+            "registry",
+            key(r"HKCU\Software\Other\Sub"),
+            "Named after the app",
+            "medium",
+        );
+        let mut keys: Vec<Target> = found.finish().into_iter().map(|l| l.target).collect();
+        keys.sort_by_key(|t| format!("{t:?}"));
+        // The surer inner key wins over a less sure outer one; otherwise the outer one takes it along.
+        assert_eq!(keys, [key(r"HKCU\Software\Other"), key(r"HKCU\Software\Vendor\App")]);
+    }
 
     #[test]
     fn cleans_app_names() {

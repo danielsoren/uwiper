@@ -17,6 +17,8 @@ pub struct ServiceItem {
     pub(crate) display_name: String,
     pub(crate) binary: Option<String>,
     pub(crate) file_exists: Option<bool>,
+    /// The company its program names.
+    publisher: Option<String>,
     start_type: &'static str,
     delayed: bool,
     pub(crate) is_windows: bool,
@@ -94,7 +96,10 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::util::{command_executable, expand_env, file_state, is_windows_component, normalize_system_path};
+    use crate::util::{
+        command_executable, expand_env, file_info, file_state, indirect_string, is_windows_component,
+        normalize_system_path, parallel_map,
+    };
     use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
     use winreg::RegKey;
 
@@ -199,11 +204,12 @@ mod imp {
             let display_name = key
                 .get_value::<String, _>("DisplayName")
                 .ok()
-                .filter(|d| !d.trim().is_empty() && !d.starts_with('@'))
+                .and_then(|d| shown_name(d.trim()))
                 .unwrap_or_else(|| name.clone());
             out.push(ServiceItem {
                 file_exists: binary.as_deref().and_then(file_state),
                 is_windows: binary.as_deref().is_none_or(is_windows_component),
+                publisher: None,
                 binary,
                 start_type: start_type(key.get_value("Start").unwrap_or(3)),
                 delayed: key.get_value::<u32, _>("DelayedAutostart").unwrap_or(0) == 1,
@@ -212,7 +218,33 @@ mod imp {
                 name,
             });
         }
+        // Drivers' own services – Realtek's, Intel's – also live in System32:
+        // their company tells them from Windows'.
+        let companies = parallel_map(&out, |s| s.binary.as_deref().and_then(|b| file_info(b).company));
+        for (service, company) in out.iter_mut().zip(companies) {
+            if service.is_windows && service.binary.is_some() {
+                service.is_windows = company
+                    .as_deref()
+                    .is_none_or(|c| c.to_lowercase().starts_with("microsoft"));
+            }
+            service.publisher = company;
+        }
         out.sort_by_key(|s| s.display_name.to_lowercase());
         Ok(out)
+    }
+
+    /// A display name as the Services console shows it: `@file,-id` read
+    /// from the file, `@oem1.inf,%Key%;Name` as the name after the `;`.
+    fn shown_name(raw: &str) -> Option<String> {
+        if raw.is_empty() {
+            return None;
+        }
+        let Some(source) = raw.strip_prefix('@') else {
+            return Some(raw.to_string());
+        };
+        match source.rsplit_once(';') {
+            Some((_, fallback)) => Some(fallback.trim().to_string()).filter(|n| !n.is_empty()),
+            None => indirect_string(&format!("@{}", expand_env(source))),
+        }
     }
 }

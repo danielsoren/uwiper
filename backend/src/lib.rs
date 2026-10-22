@@ -25,6 +25,8 @@ use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 pub struct AppState {
     pub settings: Mutex<settings::Settings>,
     pub material: Mutex<&'static str>,
+    /// Told to the user once at start, see `settings::load`.
+    pub notice: Mutex<Option<String>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -32,17 +34,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let settings = settings::load();
+            let (settings, notice) = settings::load();
             // Housekeeping: old quarantine batches and logs go away in the background.
             let for_cleanup = settings.clone();
             std::thread::spawn(move || {
                 system::remove_old_autostart();
+                // Whatever a crash interrupted mid-removal is sorted out first.
+                quarantine::recover(&for_cleanup);
                 quarantine::purge_expired(&for_cleanup);
                 log::purge(&for_cleanup);
             });
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 material: Mutex::new("none"),
+                notice: Mutex::new(notice),
             });
             create_main_window(app)?;
             Ok(())
@@ -69,6 +74,7 @@ pub fn run() {
             tracking::delete_trace,
             tracking::trace_leftovers,
             settings::get_settings,
+            settings::settings_notice,
             settings::save_settings,
             paths::storage_info,
             leftovers::scan_leftovers,

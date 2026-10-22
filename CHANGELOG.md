@@ -1,5 +1,69 @@
 # Changelog
 
+## [1.0.0] – 2026-10-22
+
+The first full release. An independent safety audit of 0.5 went through everything UWiper offers to remove, and a second review checked the fixes; every finding of both is fixed here.
+
+### Download
+
+- **UWiper.exe** – the app itself. Put it in any folder and run it.
+- **UWiper-v1.0.0-portable.zip** – the same, in a folder.
+
+### Safer cleanup
+
+- Steam, Epic Games and Battle.net: only the cache folders of their built-in browsers are cleaned. Sign-ins, cookies and history stay.
+- Cookies, history, site storage, sessions, extension data, sign-ins and browser settings are never cleaned, whatever category a folder comes from.
+- Nothing is cleaned through a link or junction, at the folder itself or any folder above it. Folders being cleaned are held open, so nothing can swap one for a link half-way – not even in the shared Windows\Temp.
+- A folder to clean that holds your own files – %TEMP% set to your profile or a drive, say – is left alone.
+- Crash reports and Windows Update downloads are off by default. Temp keeps files and folders made or changed in the last day, so an installer unpacking right now keeps its files.
+- The report tells files in use (running programs too), files Windows refused, folders it couldn't open and other failures apart. Read-only files are cleaned too.
+
+### More accurate leftovers
+
+- A folder on the Desktop is never a leftover, whatever its name – only shortcuts there are. A Start menu folder is offered whole only when it holds nothing but shortcuts.
+- Folders with saved games are always Low.
+- Services, Microsoft Store apps and running programs count as owners; a portable program claims its own name and folder's. Shared registration lists such as ASIO are never offered as orphans.
+- Low finds now say UWiper couldn't match them, not that nothing uses them.
+- A scheduled task counts as broken only when every one of its actions runs a program that's surely gone. A program on a drive that isn't plugged in, or one given without a full path, is never taken for gone – for startup entries and services too.
+- Of a folder or registry key and one inside it, only one is offered: the outer one, unless the inner one is surer.
+- Only High finds are picked to start with.
+
+### Removing and restoring
+
+- Every find UWiper can read is checked again right before it's removed, and so is why it was offered: a startup entry whose program is back, or a shortcut whose target is, is skipped with a note to scan again. A folder that only lost files since the scan still goes.
+- Quarantine backs an item up, flushes it to the disk and records it before changing anything. A copy to another drive gets its name only once it's whole. If the record can't be written, nothing more is removed.
+- The next start finishes whatever a crash interrupted: a registry key or service that was only partly removed keeps its backup and can be restored over what's left.
+- Two copies of UWiper never work on quarantine at the same time.
+- Restore leaves things alone that are there again (a reinstalled app's settings, service or task) and keeps the quarantined copy.
+
+### Uninstalling
+
+- Microsoft Edge, the WebView2 runtime and the Visual C++, .NET and Windows App runtimes aren't uninstalled while «Protect Windows and Microsoft components» is on – Windows and other apps rely on them.
+- The uninstall dialog says that what the app's own uninstaller removes isn't in quarantine. When the restore point asked for can't be made, UWiper asks before going on without it.
+
+### Startup like Task Manager
+
+- Startup tasks of Microsoft Store and other packaged apps (ChatGPT, Terminal and the like) are listed and can be switched on and off.
+- Names and publishers come from the programs themselves, as in Task Manager. Services show their publisher too.
+- Windows items are told by publisher: helpers of Realtek, Intel and other drivers that sit in System32 aren't hidden as Windows any more – in Startup and in Services.
+- An entry that runs rundll32, a command shell or a script host is judged by the file it runs.
+
+### Drivers and install tracking
+
+- Driver Store locations come from Windows' own SetupAPI, so every package is found and paired with its other versions. Extension packages and packages UWiper can't locate show Unknown. Only a package that's surely unused right before removal goes, wherever it's offered.
+- Install tracking marks something as the installer's only when something ties it to the install: a service, task or startup entry by its program or its name, a PATH entry by the folder it points to, a shortcut by its target. An app's data folder that changed after the install is Medium at uninstall time.
+
+### Settings
+
+- A settings.toml UWiper can't read – a typo, or a file from a newer version – is kept aside under a new name instead of being overwritten, and UWiper says so.
+- Settings that still had the old High & Medium default move to High only, and UWiper says so once.
+
+### Fixed
+
+- The step numbers in Installs sit in the middle of their circles.
+- The middle window button turns into Restore when the window is maximized.
+- Right-clicking no longer opens the browser's menu (Back, Refresh, Print), and browser shortcuts like F5 and Ctrl+P do nothing. Text fields and selected text keep Copy and Paste.
+
 ## [0.5.0-beta.1] – 2026-10-22
 
 Install tracking: UWiper notes what an installer adds, so uninstalling the app later removes all of it.
