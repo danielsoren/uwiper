@@ -24,7 +24,9 @@ If a new piece is generic enough to live in another app, it's a primitive (`ui/`
 
 ## Data
 
-Every Rust command is wrapped in `lib/api.ts`. Pages read data with `useResource('apps' | 'cleanup' | …)`, which loads it the first time it's needed and caches it for the session; `reload()` fetches it again, and the store's `refresh(...)` reloads whatever an action changed.
+Every Rust command is wrapped in `lib/api.ts`. Pages read data with `useResource('apps' | 'cleanup' | …)`, which loads it the first time it's needed and caches it for the session; `reload()` fetches it again, and the store's `refresh(...)` reloads whatever an action changed. A switch that should flip at once changes the loaded data with `update(...)` and puts it back if the command fails.
+
+`go(page, focus)` opens a page at a section or tab; the page takes it with `useFocus`, which scrolls to `id="section-<focus>"` and returns it for a short highlight (`flash`).
 
 While data loads, show a skeleton shaped like the content (`Skeleton`, `SkeletonRows`) rather than a spinner; buttons that start a scan take `busy`.
 

@@ -1,6 +1,6 @@
 [package]
 name = "uwiper"
-version = "0.3.0-beta.1"
+version = "0.4.0-beta.1"
 description = "Uninstall Windows apps completely and wipe every trace they leave"
 edition = "2021"
 license = "MIT"

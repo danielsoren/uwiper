@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.0-beta.1] – 2026-10-22
+
+Startup entries, services and scheduled tasks can now be switched, and old driver packages removed.
+
+### Download
+
+- **UWiper.exe** – the app itself. Put it in any folder and run it.
+- **UWiper-v0.4.0-beta.1-portable.zip** – the same, in a folder.
+
+### New
+
+- ⚡ **Switch what starts with Windows.** On the System page:
+  - startup entries turn on and off with the same switch Task Manager uses – the entry itself stays;
+  - services can be set to Automatic, Automatic (delayed), Manual or Disabled;
+  - scheduled tasks turn on and off.
+
+  Windows' own entries, services and tasks stay read-only, and every change is written to the log.
+- 🧩 **Old driver packages.** A new Drivers tab lists the third-party packages in the Driver Store with their version, date, size and the device they drive. Every driver update leaves the previous version behind, and Windows never removes it – older versions no device uses are picked for you. They go to quarantine as an export and come back into the Driver Store with Restore. A package a device still uses is never removed.
+
+### Better
+
+- Overview's cache rows open Cleanup at that group, and «Start with Windows» opens the Startup tab.
+- Button text sits exactly in the middle, warnings line up with their button, and the macOS window buttons light up one at a time, only under the pointer.
+- Messages from Windows tools come through readable on non-English Windows.
+
 ## [0.3.0-beta.1] – 2026-10-22
 
 Leftovers of apps that are long gone, and a lot more junk and caches. Still a beta – quarantine stays on by default.

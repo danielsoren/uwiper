@@ -36,8 +36,10 @@
 | --- | --- |
 | 🗑️ **Uninstall completely** | Runs the app's own uninstaller (MSI too), notices when it's done and scans for leftovers. A System Restore point first, if you like. |
 | 🔎 **Leftovers, explained** | Every find says why it's there and how sure UWiper is: **High** – certainly the app's, **Medium** – named after it, **Low** – may be shared. You tick what goes. |
-| ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML. Restore a whole batch in one click. Batches are deleted for good after 30 days (you choose). |
+| ♻️ **Quarantine first** | Files are moved aside, registry keys and services exported to `.reg`, tasks saved as XML, driver packages exported. Restore a whole batch in one click. Batches are deleted for good after 30 days (you choose). |
 | 👻 **Leftovers of apps long gone** | Folders and settings no installed app claims, apps still listed as installed whose files are gone, shortcuts and PATH entries pointing nowhere, startup entries, services and tasks whose programs are missing. Each with how sure UWiper is and when it last changed. |
+| ⚡ **Startup, services and tasks** | Switch startup entries and scheduled tasks on and off, and choose how services start – Automatic, delayed, Manual or Disabled. Windows' own stay read-only. |
+| 🧩 **Old drivers** | Every driver update leaves the previous version in the Driver Store. UWiper finds the older versions no device uses – old GPU drivers alone can take gigabytes – and quarantines them. |
 | 🧹 **Junk and caches** | Temp files, Windows Update downloads, crash dumps, logs, the Recycle Bin, caches of every Chromium and Firefox browser, Telegram, Discord, Steam and other apps – plus any app cache found by folder name, Store apps included. Cookies, passwords and history are never touched. |
 | 🛡️ **Hard to break things with** | Windows and Microsoft components, shared folders, other apps' folders and your own «Never touch» list are always off limits. |
 | 🎒 **Leaves no traces itself** | Fully portable: settings, quarantine, logs and even the WebView profile live next to the exe. Delete the folder and UWiper is gone. |
@@ -61,13 +63,21 @@
     <td align="center"><sub><b>Quarantine</b> – put anything back in one click</sub></td>
     <td align="center"><sub><b>Leftovers</b> of apps that are long gone, with how sure UWiper is</sub></td>
   </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/system.webp" alt="Choosing how a service starts"></td>
+    <td width="50%"><img src="assets/screenshots/drivers.webp" alt="Driver packages with older versions picked for removal"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>Services, startup and tasks</b> – switch them right there</sub></td>
+    <td align="center"><sub><b>Old drivers</b> – older versions no device uses</sub></td>
+  </tr>
 </table>
 
 ## 🚀 Get started
 
 1. Grab **`UWiper.exe`** (or the portable zip) from [Releases](https://github.com/danielsoren/uwiper/releases).
 2. Drop it into any folder – say `D:\Tools\UWiper` – and run it. That folder becomes UWiper's home.
-3. For a full clean, hit **Restart as administrator** in the sidebar – leftovers in Program Files, services and scheduled tasks need it.
+3. For a full clean, hit **Restart as administrator** in the sidebar – leftovers in Program Files, services, scheduled tasks and drivers need it.
 
 > [!NOTE]
 > The exe isn't code-signed yet, so SmartScreen may say «Windows protected your PC» – click **More info → Run anyway**. UWiper needs WebView2, which Windows 10 and 11 already have.
@@ -79,8 +89,8 @@
 
 - [x] **v0.1** – the foundation: design, administrator mode, installed apps
 - [x] **v0.2** – uninstall with a leftover scan, quarantine and restore
-- [x] **v0.3** – entries without an owner, junk and caches ← *you are here*
-- [ ] **v0.4** – startup, services, scheduled tasks and drivers: switch them on and off, remove old driver packages
+- [x] **v0.3** – entries without an owner, junk and caches
+- [x] **v0.4** – startup, services, scheduled tasks and drivers: switch them on and off, remove old driver packages ← *you are here*
 - [ ] **v0.5** – install tracking: snapshot what an installer creates, for a perfect uninstall later
 
 Ideas and bug reports are welcome in [Issues](https://github.com/danielsoren/uwiper/issues) 💬
@@ -109,9 +119,10 @@ backend/             Rust + Tauri
   src/targets.rs     removable things, safety rules, backup and restore
   src/quarantine.rs  quarantine batches
   src/cleanup.rs     caches: known ones, found by name or layout; cleaning
-  src/startup.rs     Run keys, Startup folders, StartupApproved state
-  src/services.rs    services and their binaries
-  src/tasks.rs       scheduled task XML under System32\Tasks
+  src/startup.rs     Run keys, Startup folders, switching them on and off
+  src/services.rs    services, their binaries and how they start
+  src/tasks.rs       scheduled task XML under System32\Tasks, on and off
+  src/drivers.rs     third-party driver packages and their older versions
   src/paths.rs       where UWiper keeps its own data
   src/settings.rs    settings.toml
   src/log.rs         daily log of every change
