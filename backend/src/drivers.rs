@@ -24,15 +24,18 @@ pub struct DriverItem {
     size_bytes: Option<u64>,
     /// A device it drives – or, for an older version, one its newest version drives.
     device: Option<String>,
-    /// A device (connected or not) is set up with it, or a service or printer
-    /// driver runs from it.
-    in_use: bool,
+    /// "used": a device (connected or not) is set up with it, or a service or
+    /// printer driver runs from it. "unused": none of that. "unknown": UWiper
+    /// can't tell (extension packages, a package it can't locate) – never removed.
+    usage: &'static str,
     /// A newer version of the same package is in the Driver Store.
     old: bool,
     /// Safe to pick for removal: an older version nothing uses, while a device
     /// uses the newest one – proof the device moved on.
     suggested: bool,
     removal: Target,
+    /// Its Driver Store folder and use when listed, checked again before removing.
+    check: Option<String>,
 }
 
 #[tauri::command]
@@ -42,6 +45,35 @@ pub async fn list_drivers() -> Result<Vec<DriverItem>> {
 
 pub fn list() -> Result<Vec<DriverItem>> {
     imp::list()
+}
+
+/// Where a published package lives: its Driver Store folder and its own INF name.
+pub(crate) fn store_location(inf: &str) -> Option<(String, String)> {
+    imp::store_location(inf)
+}
+
+/// A package's Driver Store folder and use, to tell before removing it that
+/// it's still the same package and still unused.
+pub(crate) fn fingerprint(inf: &str) -> Option<String> {
+    imp::fingerprint(inf)
+}
+
+/// Extension packages add to a device's driver without being its driver, so
+/// device keys don't show their use.
+const USE_UNKNOWABLE: [&str; 1] = ["extension"];
+
+fn usage(devices: bool, used: bool, located: bool, class: &str) -> &'static str {
+    if devices || used {
+        "used"
+    } else if !located || USE_UNKNOWABLE.contains(&class.to_lowercase().as_str()) {
+        "unknown"
+    } else {
+        "unused"
+    }
+}
+
+fn check_of(folder: Option<&str>, usage: &str) -> Option<String> {
+    folder.map(|f| format!("d:{}:{usage}", f.to_lowercase()))
 }
 
 /// What the [Version] section of an INF says.
@@ -209,6 +241,7 @@ struct Package {
     devices: Vec<String>,
     /// A service or a printer driver runs from its Driver Store folder.
     used: bool,
+    folder: Option<String>,
 }
 
 /// Printers, extension INFs and non-Plug and Play drivers can be in use in
@@ -260,10 +293,10 @@ fn finish(packages: Vec<Package>) -> Vec<DriverItem> {
             let old = top.is_some_and(|t| t != i && rank(&packages[t]) > rank(p));
             let named = |p: &Package| p.devices.iter().find(|n| !n.is_empty()).cloned();
             let device = named(p).or_else(|| top.and_then(|t| named(&packages[t])));
-            let in_use = !p.devices.is_empty() || p.used;
             let class = p.info.class.as_deref().unwrap_or_default().to_lowercase();
+            let usage = usage(!p.devices.is_empty(), p.used, p.folder.is_some(), &class);
             let suggested = old
-                && !in_use
+                && usage == "unused"
                 && top.is_some_and(|t| !packages[t].devices.is_empty())
                 && !NEVER_SUGGESTED.contains(&class.as_str());
             DriverItem {
@@ -275,10 +308,11 @@ fn finish(packages: Vec<Package>) -> Vec<DriverItem> {
                 date: p.info.date.clone(),
                 size_bytes: p.size_bytes,
                 device,
-                in_use,
+                usage,
                 old,
                 suggested,
                 removal: Target::Driver { inf: p.id.clone() },
+                check: check_of(p.folder.as_deref(), usage),
             }
         })
         .collect();
@@ -306,6 +340,14 @@ mod imp {
     pub fn list() -> Result<Vec<DriverItem>> {
         Err(Error::Unsupported)
     }
+
+    pub fn store_location(_inf: &str) -> Option<(String, String)> {
+        None
+    }
+
+    pub fn fingerprint(_inf: &str) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(windows)]
@@ -321,26 +363,16 @@ mod imp {
     pub fn list() -> Result<Vec<DriverItem>> {
         let windows = windows_dir();
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let database = hklm
-            .open_subkey_with_flags(r"SYSTEM\DriverDatabase\DriverInfFiles", KEY_READ)
-            .ok();
         // Each published INF with its Driver Store folder, such as `nv_dispi.inf_amd64_1a2b3c4d`.
         let mut published: Vec<(PathBuf, String, Option<String>)> =
             std::fs::read_dir(PathBuf::from(&windows).join("INF"))?
                 .flatten()
                 .filter_map(|e| {
                     let id = e.file_name().to_string_lossy().into_owned();
-                    if !is_published_inf(&id) {
-                        return None;
-                    }
-                    let folder = database.as_ref().and_then(|db| {
-                        let key = db.open_subkey_with_flags(&id, KEY_READ).ok()?;
-                        key.get_value::<String, _>("Active")
-                            .ok()
-                            .or_else(|| key.get_value::<Vec<String>, _>("").ok()?.into_iter().next())
-                            .filter(|f| !f.is_empty() && !f.contains(['\\', '/']))
-                    });
-                    Some((e.path(), id, folder))
+                    is_published_inf(&id).then(|| {
+                        let folder = store_location(&id).map(|(folder, _)| folder);
+                        (e.path(), id, folder)
+                    })
                 })
                 .collect();
         published.sort();
@@ -364,6 +396,7 @@ mod imp {
             Some(Package {
                 devices: devices.get(&id.to_lowercase()).cloned().unwrap_or_default(),
                 used: folder.as_ref().is_some_and(|f| users.contains(&f.to_lowercase())),
+                folder: folder.clone(),
                 id: id.clone(),
                 inf,
                 info,
@@ -371,6 +404,57 @@ mod imp {
             })
         });
         Ok(finish(packages.into_iter().flatten().collect()))
+    }
+
+    /// Through SetupAPI, which knows every package (the registry's driver
+    /// database doesn't list them all); the registry when that fails.
+    pub fn store_location(inf: &str) -> Option<(String, String)> {
+        use windows_sys::Win32::Devices::DeviceAndDriverInstallation::SetupGetInfDriverStoreLocationW;
+        let name: Vec<u16> = inf.encode_utf16().chain(Some(0)).collect();
+        let mut buf = vec![0u16; 1024];
+        let mut needed = 0u32;
+        let ok = unsafe {
+            SetupGetInfDriverStoreLocationW(
+                name.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut needed,
+            )
+        };
+        let from_api = (ok != 0).then(|| {
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+            let path = PathBuf::from(String::from_utf16_lossy(&buf[..len]));
+            let file = path.file_name()?.to_string_lossy().into_owned();
+            let folder = path.parent()?.file_name()?.to_string_lossy().into_owned();
+            Some((folder, file))
+        });
+        from_api.flatten().or_else(|| {
+            let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey_with_flags(format!(r"SYSTEM\DriverDatabase\DriverInfFiles\{inf}"), KEY_READ)
+                .ok()?;
+            let folder = key
+                .get_value::<String, _>("Active")
+                .ok()
+                .or_else(|| key.get_value::<Vec<String>, _>("").ok()?.into_iter().next())
+                .filter(|f| !f.is_empty() && !f.contains(['\\', '/']))?;
+            let end = folder.to_lowercase().find(".inf_")?;
+            let file = folder.get(..end + 4)?.to_string();
+            Some((folder, file))
+        })
+    }
+
+    pub fn fingerprint(inf: &str) -> Option<String> {
+        let folder = store_location(inf).map(|(folder, _)| folder);
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let devices = devices(&hklm).get(&inf.to_lowercase()).is_some_and(|d| !d.is_empty());
+        let used = folder
+            .as_ref()
+            .is_some_and(|f| store_users(&hklm).contains(&f.to_lowercase()));
+        let text = std::fs::read(PathBuf::from(windows_dir()).join("INF").join(inf)).ok()?;
+        let class = parse_inf(&decode_text(&text)).class.unwrap_or_default();
+        check_of(folder.as_deref(), usage(devices, used, folder.is_some(), &class))
     }
 
     /// Driver Store folders that services and printer drivers run from.
@@ -490,6 +574,7 @@ NVIDIA = "NVIDIA; Corp"
             size_bytes: Some(1),
             devices: devices.iter().map(|d| d.to_string()).collect(),
             used: false,
+            folder: Some(format!("{inf}_amd64_{id}")),
         }
     }
 
@@ -514,13 +599,13 @@ NVIDIA = "NVIDIA; Corp"
             ),
         ]);
         let get = |id: &str| items.iter().find(|i| i.id == id).unwrap();
-        assert!(!get("oem9.inf").old && get("oem9.inf").in_use);
-        assert!(get("oem3.inf").old && !get("oem3.inf").in_use && get("oem3.inf").suggested);
+        assert!(!get("oem9.inf").old && get("oem9.inf").usage == "used");
+        assert!(get("oem3.inf").old && get("oem3.inf").usage == "unused" && get("oem3.inf").suggested);
         assert!(get("oem5.inf").old);
         assert!(!get("oem7.inf").old, "the only version of its package");
         assert_eq!(get("oem3.inf").device.as_deref(), Some("NVIDIA GeForce RTX 3080"));
         let nameless = finish(vec![package("oem1.inf", "x.inf", "2024-01-01", "1.0", &[""])]);
-        assert!(nameless[0].in_use && nameless[0].device.is_none());
+        assert!(nameless[0].usage == "used" && nameless[0].device.is_none());
         assert_eq!(get("oem7.inf").class, "Display adapters");
     }
 
@@ -547,10 +632,21 @@ NVIDIA = "NVIDIA; Corp"
             "printers are never picked"
         );
         assert!(
-            get("oem6.inf").in_use && !get("oem6.inf").suggested,
+            get("oem6.inf").usage == "used" && !get("oem6.inf").suggested,
             "a service runs from it"
         );
         assert!(get("oem10.inf").old && !get("oem10.inf").suggested);
+    }
+
+    #[test]
+    fn extension_packages_and_unlocated_ones_are_unknown() {
+        let mut ext = package("oem3.inf", "ext.inf", "2021-01-01", "1.0", &[]);
+        ext.info.class = Some("Extension".into());
+        let mut lost = package("oem4.inf", "lost.inf", "2021-01-01", "1.0", &[]);
+        lost.folder = None;
+        let items = finish(vec![ext, lost]);
+        assert!(items.iter().all(|i| i.usage == "unknown" && !i.suggested));
+        assert!(items.iter().find(|i| i.id == "oem4.inf").unwrap().check.is_none());
     }
 
     #[test]

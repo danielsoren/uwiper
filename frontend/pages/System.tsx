@@ -228,7 +228,7 @@ export function System() {
 
   // Drivers: only older versions that are surely spare are picked to start with.
   const driverItems = drivers.data ?? [];
-  const canRemove = (d: DriverItem) => elevated && !d.inUse;
+  const canRemove = (d: DriverItem) => elevated && d.usage === 'unused';
   useEffect(() => {
     setPicked(new Set((drivers.data ?? []).filter((d) => d.suggested && elevated).map((d) => d.id)));
   }, [drivers.data, elevated]);
@@ -244,7 +244,7 @@ export function System() {
     try {
       const report = await api.removeItems(
         'Old drivers',
-        chosen.map((d) => ({ label: `${d.device ?? d.provider} ${d.version ?? ''} (${d.id})`.replace('  ', ' '), target: d.removal, sizeBytes: d.sizeBytes ?? 0 })),
+        chosen.map((d) => ({ label: `${d.device ?? d.provider} ${d.version ?? ''} (${d.id})`.replace('  ', ' '), target: d.removal, sizeBytes: d.sizeBytes ?? 0, check: d.check })),
       );
       setProblems(report.problems);
       if (report.removed > 0) {

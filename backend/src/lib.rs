@@ -37,6 +37,8 @@ pub fn run() {
             let for_cleanup = settings.clone();
             std::thread::spawn(move || {
                 system::remove_old_autostart();
+                // Whatever a crash interrupted mid-removal is sorted out first.
+                quarantine::recover(&for_cleanup);
                 quarantine::purge_expired(&for_cleanup);
                 log::purge(&for_cleanup);
             });

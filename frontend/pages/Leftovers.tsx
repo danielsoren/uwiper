@@ -44,7 +44,7 @@ export function Leftovers() {
     try {
       const report = await api.removeItems(
         'Leftovers',
-        picked.map((l) => ({ label: l.label, target: l.target, sizeBytes: l.sizeBytes ?? 0 })),
+        picked.map((l) => ({ label: l.label, target: l.target, sizeBytes: l.sizeBytes ?? 0, check: l.check })),
       );
       setProblems(report.problems);
       if (report.removed > 0) {

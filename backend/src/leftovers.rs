@@ -42,6 +42,8 @@ pub struct Leftover {
     modified: Option<u64>,
     needs_admin: bool,
     target: Target,
+    /// What it looked like at the scan, checked again before it's removed.
+    check: Option<String>,
 }
 
 #[tauri::command]
@@ -284,6 +286,7 @@ impl Found {
             modified,
             needs_admin,
             target,
+            check: None,
         });
     }
 
@@ -323,17 +326,22 @@ impl Found {
         });
         let stats = parallel_map(&self.items, |item| match &item.target {
             Target::Path { path } => {
-                let (bytes, _, newest) = dir_stats(Path::new(path));
-                (Some(bytes), newest)
+                let (bytes, files, newest) = dir_stats(Path::new(path));
+                (
+                    Some(bytes),
+                    newest,
+                    Some(targets::path_fingerprint(bytes, files, newest)),
+                )
             }
-            _ => (None, None),
+            target => (None, None, targets::fingerprint(target)),
         });
         let saves = parallel_map(&self.items, |item| match &item.target {
             Target::Path { path } if item.kind == "folder" => holds_saved_games(Path::new(path)),
             _ => false,
         });
-        for ((item, (size, newest)), saves) in self.items.iter_mut().zip(stats).zip(saves) {
+        for ((item, (size, newest, check)), saves) in self.items.iter_mut().zip(stats).zip(saves) {
             item.size_bytes = size;
+            item.check = check;
             item.modified = item.modified.or(newest);
             // Saved games are never a sure thing to remove.
             if saves {

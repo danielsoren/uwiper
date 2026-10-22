@@ -1690,9 +1690,6 @@ mod imp {
 
     /// Published third-party driver packages with their Driver Store folders.
     pub fn driver_packages() -> Vec<(String, Option<String>)> {
-        let database = hive("HKLM")
-            .open_subkey_with_flags(r"SYSTEM\DriverDatabase\DriverInfFiles", KEY_READ)
-            .ok();
         let Ok(entries) = std::fs::read_dir(PathBuf::from(windows_dir()).join("INF")) else {
             return Vec::new();
         };
@@ -1701,13 +1698,7 @@ mod imp {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|name| is_published_inf(name))
             .map(|name| {
-                let folder = database.as_ref().and_then(|db| {
-                    let key = db.open_subkey_with_flags(&name, KEY_READ).ok()?;
-                    key.get_value::<String, _>("Active")
-                        .ok()
-                        .or_else(|| key.get_value::<Vec<String>, _>("").ok()?.into_iter().next())
-                        .filter(|f| !f.is_empty())
-                });
+                let folder = crate::drivers::store_location(&name).map(|(folder, _)| folder);
                 (name, folder)
             })
             .collect()

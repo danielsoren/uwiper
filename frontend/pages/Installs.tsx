@@ -46,7 +46,7 @@ function CleanUpDialog({ trace, onClose }: { trace: TraceView; onClose: () => vo
     try {
       const report = await api.removeItems(
         trace.name,
-        picked.map((l) => ({ label: l.label, target: l.target, sizeBytes: l.sizeBytes ?? 0 })),
+        picked.map((l) => ({ label: l.label, target: l.target, sizeBytes: l.sizeBytes ?? 0, check: l.check })),
       );
       setProblems(report.problems);
       if (report.removed > 0) {

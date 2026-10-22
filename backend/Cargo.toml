@@ -33,6 +33,7 @@ base64 = "0.22"
 winreg = "0.56"
 window-vibrancy = "0.8"
 windows-sys = { version = "0.61", features = [
+  "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Foundation",
   "Win32_Globalization",
   "Win32_Graphics_Gdi",

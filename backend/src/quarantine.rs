@@ -40,6 +40,10 @@ pub struct Item {
     /// The folder inside the batch that holds the backup.
     dir: String,
     note: Option<String>,
+    /// Backed up and recorded, but not removed yet: if UWiper stopped right
+    /// here, the next start finds out which way it went.
+    #[serde(default)]
+    pending: bool,
 }
 
 /// Something to remove, as the UI sends it.
@@ -50,6 +54,9 @@ pub struct Removal {
     target: Target,
     #[serde(default)]
     size_bytes: u64,
+    /// What the target looked like when the scan offered it.
+    #[serde(default)]
+    check: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -114,7 +121,13 @@ fn new_id(root: &Path, title: &str) -> String {
 fn save(dir: &Path, batch: &Batch) -> Result<()> {
     let json = serde_json::to_string_pretty(batch).map_err(|e| Error::Other(e.to_string()))?;
     let temp = dir.join(format!("{MANIFEST}.new"));
-    std::fs::write(&temp, json)?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(json.as_bytes())?;
+        // On disk before anything is removed, not just in a cache.
+        file.sync_all()?;
+    }
     std::fs::rename(&temp, dir.join(MANIFEST))?;
     Ok(())
 }
@@ -170,8 +183,15 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
 
     let mut items = items;
     items.sort_by_key(|item| removal_order(&item.target));
-    let mut unsaved = None;
+    let mut stopped: Option<String> = None;
     for (i, item) in items.into_iter().enumerate() {
+        if let Some(why) = &stopped {
+            report.problems.push(Problem {
+                label: item.label,
+                error: why.clone(),
+            });
+            continue;
+        }
         if let Err(reason) = check(&item.target) {
             log.push(format!("  skipped {} – {reason}", item.label));
             report.problems.push(Problem {
@@ -180,19 +200,31 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
             });
             continue;
         }
+        // It may have changed since the scan: an emptied folder filled up, an
+        // app installed again, a service fixed.
+        if item
+            .check
+            .as_deref()
+            .is_some_and(|c| !targets::unchanged(&item.target, c))
+        {
+            log.push(format!("  skipped {} – changed since the scan", item.label));
+            report.problems.push(Problem {
+                label: item.label,
+                error: "Changed since the scan – scan again".into(),
+            });
+            continue;
+        }
         let result = if keep {
             let item_dir = format!("{i:03}");
-            targets::quarantine(&item.target, &dir.join(&item_dir)).map(|(backup, note)| {
-                batch.items.push(Item {
-                    label: item.label.clone(),
-                    target: item.target.clone(),
-                    backup,
-                    size_bytes: item.size_bytes,
-                    dir: item_dir.clone(),
-                    note: note.clone(),
-                });
-                note
-            })
+            match quarantine_one(&dir, &item_dir, &item, &mut batch) {
+                Ok(note) => Ok(note),
+                Err(Failure::Item(e)) => Err(e),
+                Err(Failure::Journal(e)) => {
+                    let why = format!("Not removed – the quarantine list couldn't be written ({e})");
+                    stopped = Some(why.clone());
+                    Err(Error::Other(why))
+                }
+            }
         } else {
             targets::delete(&item.target).map(|_| None)
         };
@@ -204,15 +236,8 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
                 }
                 report.removed += 1;
                 report.freed_bytes += item.size_bytes;
-                // Keep the manifest current, so a crash still leaves a batch that can be restored.
-                if keep {
-                    unsaved = save(&dir, &batch).err();
-                }
             }
             Err(e) => {
-                if keep {
-                    let _ = std::fs::remove_dir_all(dir.join(format!("{i:03}")));
-                }
                 log.push(format!("  failed {} – {e}", targets::describe(&item.target)));
                 report.problems.push(Problem {
                     label: item.label,
@@ -222,12 +247,6 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
         }
     }
 
-    if let Some(e) = unsaved {
-        report.notes.push(format!(
-            "The quarantine list couldn't be saved ({e}) – the files are in {}",
-            dir.display()
-        ));
-    }
     if keep && batch.items.is_empty() {
         let _ = std::fs::remove_dir_all(&dir);
     } else if keep {
@@ -235,6 +254,108 @@ fn remove_checked(settings: &Settings, title: &str, items: Vec<Removal>, check: 
     }
     log::write(settings, &log);
     Ok(report)
+}
+
+enum Failure {
+    /// This item couldn't be backed up or removed; the batch goes on.
+    Item(Error),
+    /// The quarantine list can't be written: nothing more may be removed.
+    Journal(Error),
+}
+
+/// Backs one item up, records it as pending, removes it and records that.
+/// Nothing is removed unless its backup and the record of it are on disk.
+fn quarantine_one(
+    dir: &Path,
+    item_dir: &str,
+    item: &Removal,
+    batch: &mut Batch,
+) -> std::result::Result<Option<String>, Failure> {
+    let path = dir.join(item_dir);
+    let discard = |batch: &mut Batch| {
+        batch.items.retain(|i| i.dir != item_dir);
+        let _ = std::fs::remove_dir_all(&path);
+    };
+    let backup = match targets::back_up(&item.target, &path) {
+        Ok(b) => b,
+        Err(e) => {
+            discard(batch);
+            return Err(Failure::Item(e));
+        }
+    };
+    batch.items.push(Item {
+        label: item.label.clone(),
+        target: item.target.clone(),
+        backup: backup.clone(),
+        size_bytes: item.size_bytes,
+        dir: item_dir.to_string(),
+        note: None,
+        pending: true,
+    });
+    if let Err(e) = save(dir, batch) {
+        discard(batch);
+        return Err(Failure::Journal(e));
+    }
+    let removed = targets::remove(&item.target, &backup, &path);
+    match removed {
+        Ok(note) => {
+            if let Some(last) = batch.items.iter_mut().find(|i| i.dir == item_dir) {
+                last.pending = false;
+                last.note = note.clone();
+            }
+            // Should this fail, the next start sees the item is gone and finishes it.
+            save(dir, batch).map_err(Failure::Journal)?;
+            Ok(note)
+        }
+        Err(e) => {
+            discard(batch);
+            let _ = save(dir, batch);
+            Err(Failure::Item(e))
+        }
+    }
+}
+
+/// Finishes what a crash or power cut interrupted: an item recorded as
+/// pending is done when its target is gone, and dropped when it's still there.
+pub fn recover(settings: &Settings) {
+    let Ok(entries) = std::fs::read_dir(root(settings)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Some(mut batch) = load(&dir) else { continue };
+        if !batch.items.iter().any(|i| i.pending) {
+            continue;
+        }
+        let mut kept = Vec::new();
+        for mut item in batch.items.drain(..) {
+            if !item.pending {
+                kept.push(item);
+                continue;
+            }
+            let moved_copy = match &item.backup {
+                Backup::Moved { file } => std::fs::symlink_metadata(dir.join(&item.dir).join(file)).is_ok(),
+                _ => true,
+            };
+            if moved_copy && !targets::exists(&item.target) {
+                item.pending = false;
+                kept.push(item);
+            } else if moved_copy && matches!(item.backup, Backup::Moved { .. }) {
+                // Partly moved: what was moved is kept to put back.
+                item.pending = false;
+                item.note = Some("Only partly removed – UWiper stopped half-way".into());
+                kept.push(item);
+            } else {
+                let _ = std::fs::remove_dir_all(dir.join(&item.dir));
+            }
+        }
+        batch.items = kept;
+        if batch.items.is_empty() {
+            let _ = std::fs::remove_dir_all(&dir);
+        } else {
+            let _ = save(&dir, &batch);
+        }
+    }
 }
 
 pub fn list(settings: &Settings) -> Vec<Batch> {
@@ -363,6 +484,7 @@ mod tests {
                     path: app.to_string_lossy().into(),
                 },
                 size_bytes: 64,
+                check: None,
             },
             Removal {
                 label: "Gone".into(),
@@ -370,6 +492,7 @@ mod tests {
                     path: gone.to_string_lossy().into(),
                 },
                 size_bytes: 0,
+                check: None,
             },
         ];
         // Temp paths on Linux don't look like Windows paths; the guard has its own tests.

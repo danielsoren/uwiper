@@ -3,8 +3,9 @@ import { formatBytes, formatDate } from '../../lib/format';
 import type { DriverItem } from '../../lib/types';
 import { Checkbox, IconTile, ListCard, Pill, type PillTone } from '../../ui';
 
-const STATE: Record<'inUse' | 'old' | 'spare', { label: string; tone: PillTone; hint: string }> = {
+const STATE: Record<'inUse' | 'unknown' | 'old' | 'spare', { label: string; tone: PillTone; hint: string }> = {
   inUse: { label: 'In use', tone: 'good', hint: 'A device, a service or a printer uses this package' },
+  unknown: { label: 'Unknown', tone: 'dim', hint: "UWiper can't tell whether something uses it, so it's never removed" },
   old: { label: 'Older version', tone: 'warn', hint: 'A newer version of this package is in the Driver Store' },
   spare: { label: 'Not in use', tone: 'dim', hint: 'No device is set up with it, but it is the only version – it may be for a device you connect now and then' },
 };
@@ -43,7 +44,7 @@ export function DriverList({
       {items.map((d) => {
         const allowed = canRemove(d);
         const on = selected.has(d.id);
-        const state = STATE[d.inUse ? 'inUse' : d.old ? 'old' : 'spare'];
+        const state = STATE[d.usage === 'used' ? 'inUse' : d.usage === 'unknown' ? 'unknown' : d.old ? 'old' : 'spare'];
         const name = d.device ?? shortProvider(d.provider);
         return (
           <div
@@ -52,7 +53,7 @@ export function DriverList({
             className={cn('flex min-h-[60px] items-center gap-3.5 px-4 py-2.5', allowed && 'cursor-pointer hover:bg-hover')}
           >
             <Checkbox label={`Remove ${name} ${d.version ?? ''}`} checked={on} disabled={!allowed} onChange={(v) => toggle(d.id, v)} />
-            <IconTile icon="cpu" tone={d.old && !d.inUse ? 'orange' : 'accent'} small />
+            <IconTile icon="cpu" tone={d.old && d.usage === 'unused' ? 'orange' : 'accent'} small />
             <span className="flex min-w-0 flex-[1_1_200px] flex-col gap-0.5">
               <span className="truncate text-label font-semibold">{name}</span>
               <span className="truncate text-small text-fg-3">

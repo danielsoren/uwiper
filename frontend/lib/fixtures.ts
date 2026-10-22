@@ -113,7 +113,7 @@ let tasks: TaskItem[] = ([
 ] as Omit<TaskItem, 'removal'>[]).map((i) => ({ ...i, removal: { kind: 'task', path: `\\${i.name}` } }));
 
 const DRIVER = (id: string, inf: string, provider: string, cls: string, version: string, date: string, mb: number, device: string | null, inUse: boolean, old: boolean): DriverItem => ({
-  id, inf, provider, class: cls, version, date, sizeBytes: mb * MB, device, inUse, old, suggested: old && !inUse, removal: { kind: 'driver', inf: id },
+  id, inf, provider, class: cls, version, date, sizeBytes: mb * MB, device, usage: inUse ? 'used' : 'unused', old, suggested: old && !inUse, removal: { kind: 'driver', inf: id }, check: null,
 });
 
 let drivers: DriverItem[] = [

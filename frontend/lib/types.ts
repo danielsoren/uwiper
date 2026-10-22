@@ -44,6 +44,8 @@ export interface Leftover {
   modified: number | null;
   needsAdmin: boolean;
   target: Target;
+  /** What it looked like at the scan; checked again before removing. */
+  check?: string | null;
 }
 
 export interface OrphanScan {
@@ -59,6 +61,7 @@ export interface Removal {
   label: string;
   target: Target;
   sizeBytes?: number;
+  check?: string | null;
 }
 
 export interface Problem {
@@ -180,12 +183,15 @@ export interface DriverItem {
   sizeBytes: number | null;
   /** A device it drives – or, for an older version, one its newest version drives. */
   device: string | null;
-  inUse: boolean;
+  /** Used by a device, service or printer; unused; or UWiper can't tell (then it's never removed). */
+  usage: 'used' | 'unused' | 'unknown';
   /** A newer version of the same package is in the Driver Store. */
   old: boolean;
   /** An older version nothing uses while a device uses the newest: picked to start with. */
   suggested: boolean;
   removal: Target;
+  /** What it looked like at the scan; checked again before removing. */
+  check: string | null;
 }
 
 export interface TrackingStatus {

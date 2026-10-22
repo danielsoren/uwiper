@@ -103,7 +103,7 @@ export function UninstallDialog({ app, onClose }: { app: InstalledApp; onClose: 
     try {
       const report = await api.removeItems(
         `Uninstall ${app.name}`,
-        items.map((l) => ({ label: l.label, target: l.target, sizeBytes: l.sizeBytes ?? 0 })),
+        items.map((l) => ({ label: l.label, target: l.target, sizeBytes: l.sizeBytes ?? 0, check: l.check })),
       );
       setStep({ name: 'done', report });
     } catch (e) {

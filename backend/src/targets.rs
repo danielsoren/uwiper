@@ -518,9 +518,9 @@ fn friendly_io(e: std::io::Error) -> Error {
 // ---------------------------------------------------------------------------
 // Removing, backing up and restoring.
 
-/// Removes the target and keeps a backup of it in `dir`. The note says when
-/// it was only partly removed.
-pub fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>)> {
+/// Saves what's needed to put the target back into `dir`, changing nothing
+/// yet: a file or folder is moved there by `remove`.
+pub fn back_up(target: &Target, dir: &Path) -> Result<Backup> {
     std::fs::create_dir_all(dir)?;
     match target {
         Target::Path { path } => {
@@ -532,11 +532,66 @@ pub fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "item".into());
-            let complete = move_path(&source, &dir.join(&name))?;
-            let note = (!complete).then(|| "Some files were in use and stayed behind".to_string());
-            Ok((Backup::Moved { file: name }, note))
+            Ok(Backup::Moved { file: name })
         }
-        _ => imp::quarantine(target, dir),
+        _ => imp::back_up(target, dir),
+    }
+}
+
+/// Removes a target whose backup `back_up` saved. The note says when it was
+/// only partly removed.
+pub fn remove(target: &Target, backup: &Backup, dir: &Path) -> Result<Option<String>> {
+    match (target, backup) {
+        (Target::Path { path }, Backup::Moved { file }) => {
+            let complete = move_path(Path::new(path), &dir.join(file))?;
+            Ok((!complete).then(|| "Some files were in use and stayed behind".to_string()))
+        }
+        _ => imp::remove(target, backup),
+    }
+}
+
+/// Whether the target is still there. Unreadable counts as there.
+pub fn exists(target: &Target) -> bool {
+    match target {
+        Target::Path { path } => std::fs::symlink_metadata(path).is_ok(),
+        _ => imp::exists(target),
+    }
+}
+
+/// What a target looks like now: compared before removing it, so nothing is
+/// removed that changed since the scan that offered it.
+pub fn fingerprint(target: &Target) -> Option<String> {
+    match target {
+        Target::Path { path } => {
+            let (bytes, files, newest) = crate::util::dir_stats(Path::new(path));
+            Some(path_fingerprint(bytes, files, newest))
+        }
+        _ => imp::fingerprint(target),
+    }
+}
+
+pub fn path_fingerprint(bytes: u64, files: u64, newest: Option<u64>) -> String {
+    format!("p:{files}:{bytes}:{}", newest.unwrap_or(0))
+}
+
+/// True when the target is as it was when `check` was taken. A folder that
+/// only lost files (an uninstaller still finishing) counts as the same.
+pub fn unchanged(target: &Target, check: &str) -> bool {
+    let Some(now) = fingerprint(target) else {
+        return false;
+    };
+    let parse = |f: &str| -> Option<(u64, u64)> {
+        let mut parts = f.strip_prefix("p:")?.split(':');
+        let files = parts.next()?.parse().ok()?;
+        let _bytes = parts.next()?;
+        let newest = parts.next()?.parse().ok()?;
+        Some((files, newest))
+    };
+    match (parse(check), parse(&now)) {
+        (Some((files_then, newest_then)), Some((files_now, newest_now))) => {
+            files_now <= files_then && newest_now <= newest_then
+        }
+        _ => now == check,
     }
 }
 
@@ -593,8 +648,20 @@ fn choose_inf(mut found: Vec<(usize, String)>, original: Option<&str>) -> Option
 mod imp {
     use super::*;
 
-    pub fn quarantine(_target: &Target, _dir: &Path) -> Result<(Backup, Option<String>)> {
+    pub fn back_up(_target: &Target, _dir: &Path) -> Result<Backup> {
         Err(Error::Unsupported)
+    }
+
+    pub fn remove(_target: &Target, _backup: &Backup) -> Result<Option<String>> {
+        Err(Error::Unsupported)
+    }
+
+    pub fn exists(_target: &Target) -> bool {
+        true
+    }
+
+    pub fn fingerprint(_target: &Target) -> Option<String> {
+        None
     }
 
     pub fn delete(_target: &Target) -> Result<()> {
@@ -645,67 +712,117 @@ mod imp {
         PathBuf::from(format!(r"{}\System32\Tasks{}", windows_dir(), path))
     }
 
-    pub fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>)> {
+    pub fn back_up(target: &Target, dir: &Path) -> Result<Backup> {
         match target {
             Target::RegistryKey { key } => {
                 let file = "key.reg";
                 export(key, &dir.join(file))?;
-                // Deleting a tree can stop half-way at a protected subkey, so
-                // once exported, the backup is kept whatever happens.
-                let note = delete(target)
-                    .err()
-                    .map(|e| format!("Only partly removed ({e}) – its backup is kept"));
-                Ok((Backup::Reg { file: file.into() }, note))
+                Ok(Backup::Reg { file: file.into() })
             }
             Target::RegistryValue { key, name } => {
                 let (h, sub) = split_key(key).ok_or(Error::Other("Not a registry key".into()))?;
-                let reg = hive(h)
-                    .open_subkey_with_flags(sub, KEY_READ | KEY_SET_VALUE)
-                    .map_err(registry_error)?;
+                let reg = hive(h).open_subkey_with_flags(sub, KEY_READ).map_err(registry_error)?;
                 let value = reg.get_raw_value(name).map_err(registry_error)?;
-                reg.delete_value(name).map_err(registry_error)?;
-                Ok((
-                    Backup::Value {
-                        vtype: value.vtype as u32,
-                        data: value.bytes.into_owned(),
-                    },
-                    None,
-                ))
+                Ok(Backup::Value {
+                    vtype: value.vtype as u32,
+                    data: value.bytes.into_owned(),
+                })
             }
             Target::Service { name } => {
                 let file = "service.reg";
                 export(&service_key(name), &dir.join(file))?;
-                delete(target)?;
-                Ok((Backup::Reg { file: file.into() }, None))
+                Ok(Backup::Reg { file: file.into() })
             }
             Target::Task { path } => {
                 let file = "task.xml";
                 std::fs::copy(task_file(path), dir.join(file)).map_err(friendly_io)?;
-                delete(target)?;
-                Ok((Backup::TaskXml { file: file.into() }, None))
+                Ok(Backup::TaskXml { file: file.into() })
             }
             Target::PathEntry { scope, entry } => {
-                let (key, text, vtype) = read_path(scope)?;
-                let (next, positions) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
-                write_path(&key, &next, vtype)?;
-                Ok((Backup::PathEntry { positions }, None))
+                let (_, text, _) = read_path(scope)?;
+                let (_, positions) = without_entry(&text, entry).ok_or(Error::Other("Already gone".into()))?;
+                Ok(Backup::PathEntry { positions })
             }
             Target::Driver { inf } => {
                 let folder = dir.join("driver");
                 std::fs::create_dir_all(&folder)?;
                 run_tool("pnputil.exe", &["/export-driver", inf, &folder.to_string_lossy()])?;
                 // Only once the package's own INF is in the export can it be put back.
-                let exported = exported_inf(&folder, driver_original_inf(inf).as_deref())
-                    .ok_or(Error::Other("Windows didn't export the whole package".into()));
-                match exported.and_then(|file| delete_driver(inf).map(|note| (file, note))) {
-                    Ok((file, note)) => Ok((Backup::Driver { inf: file }, note)),
-                    Err(e) => {
-                        let _ = remove_path(&folder);
-                        Err(e)
-                    }
-                }
+                exported_inf(&folder, driver_original_inf(inf).as_deref())
+                    .map(|file| Backup::Driver { inf: file })
+                    .ok_or(Error::Other("Windows didn't export the whole package".into()))
             }
             Target::Path { .. } => unreachable!("paths are handled by the caller"),
+        }
+    }
+
+    pub fn remove(target: &Target, _backup: &Backup) -> Result<Option<String>> {
+        match target {
+            // Deleting a tree can stop half-way at a protected subkey; the
+            // export is kept whatever happens.
+            Target::RegistryKey { .. } => Ok(delete(target)
+                .err()
+                .map(|e| format!("Only partly removed ({e}) – its backup is kept"))),
+            Target::Driver { inf } => delete_driver(inf),
+            _ => delete(target).map(|_| None),
+        }
+    }
+
+    fn open_key(key: &str) -> std::io::Result<RegKey> {
+        let (h, sub) = split_key(key).ok_or(std::io::ErrorKind::NotFound)?;
+        hive(h).open_subkey_with_flags(sub, KEY_READ)
+    }
+
+    /// Unreadable counts as there.
+    fn there(result: std::io::Result<()>) -> bool {
+        !matches!(result, Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    }
+
+    pub fn exists(target: &Target) -> bool {
+        match target {
+            Target::RegistryKey { key } => there(open_key(key).map(|_| ())),
+            Target::RegistryValue { key, name } => there(open_key(key).and_then(|k| k.get_raw_value(name).map(|_| ()))),
+            Target::Service { name } => there(open_key(&service_key(name)).map(|_| ())),
+            Target::Task { path } => there(std::fs::symlink_metadata(task_file(path)).map(|_| ())),
+            Target::PathEntry { scope, entry } => {
+                read_path(scope).is_ok_and(|(_, text, _)| without_entry(&text, entry).is_some())
+            }
+            Target::Driver { inf } => PathBuf::from(windows_dir()).join("INF").join(inf).exists(),
+            Target::Path { path } => std::fs::symlink_metadata(path).is_ok(),
+        }
+    }
+
+    /// A key's subkey and value counts and when it last changed.
+    fn key_print(key: &str) -> Option<String> {
+        let info = open_key(key).and_then(|k| k.query_info()).ok()?;
+        let t = info.get_last_write_time_system();
+        Some(format!(
+            "k:{}:{}:{}-{}-{} {}:{}:{}.{}",
+            info.sub_keys, info.values, t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds
+        ))
+    }
+
+    pub fn fingerprint(target: &Target) -> Option<String> {
+        match target {
+            Target::RegistryKey { key } => key_print(key),
+            Target::Service { name } => key_print(&service_key(name)),
+            Target::RegistryValue { key, name } => {
+                let value = open_key(key).and_then(|k| k.get_raw_value(name)).ok()?;
+                Some(format!("v:{}:{}", value.vtype as u32, crate::util::fnv(&value.bytes)))
+            }
+            Target::Task { path } => {
+                let meta = std::fs::metadata(task_file(path)).ok()?;
+                let modified = meta
+                    .modified()
+                    .ok()?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_secs();
+                Some(format!("t:{}:{modified}", meta.len()))
+            }
+            Target::PathEntry { .. } => exists(target).then(|| "e".to_string()),
+            Target::Driver { inf } => crate::drivers::fingerprint(inf),
+            Target::Path { .. } => None,
         }
     }
 
@@ -725,17 +842,9 @@ mod imp {
         choose_inf(found, original)
     }
 
-    /// The package's own INF name (`nv_dispi.inf`), from its Driver Store folder.
+    /// The package's own INF name (`nv_dispi.inf`).
     fn driver_original_inf(inf: &str) -> Option<String> {
-        let key = RegKey::predef(HKEY_LOCAL_MACHINE)
-            .open_subkey_with_flags(format!(r"SYSTEM\DriverDatabase\DriverInfFiles\{inf}"), KEY_READ)
-            .ok()?;
-        let folder = key
-            .get_value::<String, _>("Active")
-            .ok()
-            .or_else(|| key.get_value::<Vec<String>, _>("").ok()?.into_iter().next())?;
-        let end = folder.to_lowercase().find(".inf_")?;
-        folder.get(..end + 4).map(str::to_string)
+        crate::drivers::store_location(inf).map(|(_, file)| file)
     }
 
     /// Removes a package and checks that it's gone: pnputil can report an error
@@ -860,6 +969,17 @@ mod imp {
     }
 
     pub fn restore(target: &Target, backup: &Backup, dir: &Path) -> Result<()> {
+        // A reinstalled app has its own settings, service or task by now:
+        // merging the old ones in could break it.
+        let back_again = matches!(
+            target,
+            Target::RegistryKey { .. } | Target::RegistryValue { .. } | Target::Service { .. } | Target::Task { .. }
+        ) && exists(target);
+        if back_again {
+            return Err(Error::Other(
+                "It's there again (reinstalled?) – the quarantined copy is kept".into(),
+            ));
+        }
         match (target, backup) {
             (Target::RegistryKey { .. } | Target::Service { .. }, Backup::Reg { file }) => import(&dir.join(file)),
             (Target::RegistryValue { key, name }, Backup::Value { vtype, data }) => {
@@ -898,6 +1018,12 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quarantine(target: &Target, dir: &Path) -> Result<(Backup, Option<String>)> {
+        let backup = back_up(target, dir)?;
+        let note = remove(target, &backup, dir)?;
+        Ok((backup, note))
+    }
 
     fn guard() -> Guard {
         Guard {
