@@ -3,6 +3,7 @@ import { api, errorText } from '../lib/api';
 import type {
   Batch,
   CleanupItem,
+  OrphanScan,
   Environment,
   InstalledApp,
   ServiceItem,
@@ -23,6 +24,7 @@ export interface Resources {
   tasks: TaskItem[];
   storage: StorageInfo;
   quarantine: Batch[];
+  orphans: OrphanScan;
 }
 
 export type ResourceKey = keyof Resources;
@@ -42,6 +44,7 @@ const FETCH: { [K in ResourceKey]: () => Promise<Resources[K]> } = {
   tasks: api.listTasks,
   storage: api.storageInfo,
   quarantine: api.listQuarantine,
+  orphans: api.scanOrphans,
 };
 
 const idle = <T>(): Resource<T> => ({ data: null, error: null, loading: false, requested: false });
@@ -94,6 +97,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       tasks: idle(),
       storage: idle(),
       quarantine: idle(),
+      orphans: idle(),
     },
     toasts: [],
 
@@ -123,7 +127,7 @@ export const useAppStore = create<AppState>()((set, get) => {
       for (const key of keys) if (get().res[key].requested) get().load(key, true);
     },
 
-    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks'),
+    afterChange: () => get().refresh('quarantine', 'storage', 'startup', 'services', 'tasks', 'orphans'),
 
     updateSettings: (change) => {
       const before = get().settings;

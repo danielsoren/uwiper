@@ -4,7 +4,6 @@ import { StatCard } from '../components/overview/StatCard';
 import { api } from '../lib/api';
 import { formatBytes, plural } from '../lib/format';
 import { useResource } from '../store/hooks';
-import { brokenEntries } from '../store/selectors';
 import { useAppStore } from '../store/useAppStore';
 import { Button, Card, Icon, IconTile, Skeleton } from '../ui';
 
@@ -31,19 +30,21 @@ export function Overview() {
   const storage = useResource('storage');
   const quarantine = useResource('quarantine');
 
-  const rescan = () => [cleanup, apps, startup, services, tasks, storage, quarantine].forEach((r) => r.reload());
+  const rescan = () => [cleanup, apps, startup, services, tasks, storage, quarantine, orphans].forEach((r) => r.reload());
 
   const items = cleanup.data ?? [];
   const safeBytes = items.filter((i) => i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
   const optionalBytes = items.filter((i) => !i.defaultOn).reduce((s, i) => s + i.sizeBytes, 0);
-  const broken = brokenEntries(startup.data, services.data, tasks.data);
+  const orphans = useResource('orphans');
+  const leftovers = orphans.data?.items ?? [];
+  const sure = leftovers.filter((l) => l.confidence !== 'low').length;
   const appBytes = (apps.data ?? []).reduce((s, a) => s + (a.sizeBytes ?? 0), 0);
   const outside = (storage.data?.dirs ?? []).filter((d) => !d.inside).length;
 
   return (
     <>
       <PageHeader title="Overview" subtitle="Your PC at a glance – what takes space and what removed apps left behind">
-        <Button icon="refresh" onClick={rescan} busy={[cleanup, apps, startup, services, tasks].some((r) => r.loading)}>
+        <Button icon="refresh" onClick={rescan} busy={[cleanup, apps, startup, services, tasks, orphans].some((r) => r.loading)}>
           Scan again
         </Button>
       </PageHeader>
@@ -80,10 +81,17 @@ export function Overview() {
           <StatCard
             icon="traces"
             tone="purple"
-            value={startup.data || services.data || tasks.data ? String(broken.total) : null}
-            loading={startup.loading || services.loading || tasks.loading}
-            label="Entries pointing nowhere"
-            sub="Startup, services and tasks whose files are gone"
+            value={orphans.data ? String(sure) : null}
+            loading={orphans.loading}
+            label="Leftovers"
+            sub={
+              orphans.error ??
+              (orphans.data
+                ? leftovers.length > sure
+                  ? `Left by apps that are gone, plus ${leftovers.length - sure} maybe`
+                  : 'Left by apps that are gone'
+                : 'Looking…')
+            }
             onClick={() => go('leftovers')}
           />
           <StatCard

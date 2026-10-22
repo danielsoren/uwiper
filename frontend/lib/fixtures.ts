@@ -8,6 +8,7 @@ import type {
   Environment,
   InstalledApp,
   Leftover,
+  OrphanScan,
   Removal,
   RemoveReport,
   ServiceItem,
@@ -153,7 +154,7 @@ let batches: Batch[] = [
 function leftoversOf(app: AppRef): Leftover[] {
   const name = app.name.replace(/\s*[\d.]+.*$/, '') || app.name;
   const item = (kind: Leftover['kind'], target: Leftover['target'], label: string, reason: string, confidence: Leftover['confidence'], sizeBytes: number | null): Leftover =>
-    ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes, needsAdmin: !label.startsWith('C:\\Users') && !label.startsWith('HKCU'), target });
+    ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes, modified: null, needsAdmin: !label.startsWith('C:\\Users') && !label.startsWith('HKCU'), target });
   const path = (p: string, reason: string, confidence: Leftover['confidence'], mb: number, kind: Leftover['kind'] = 'folder') =>
     item(kind, { kind: 'path', path: p }, p, reason, confidence, mb * MB);
   const out = [
@@ -168,13 +169,48 @@ function leftoversOf(app: AppRef): Leftover[] {
   return out.filter((l, i) => out.findIndex((o) => o.id === l.id) === i);
 }
 
+const YEAR = 365 * DAY;
+
+/** A sample of what the orphan scan finds on a PC that has seen some apps come and go. */
+function orphanSample(): Leftover[] {
+  const it = (
+    kind: Leftover['kind'],
+    target: Leftover['target'],
+    label: string,
+    reason: string,
+    confidence: Leftover['confidence'],
+    sizeMb: number | null,
+    age: number | null,
+    needsAdmin = false,
+  ): Leftover => ({ id: label.toLowerCase(), kind, label, reason, confidence, sizeBytes: sizeMb === null ? null : sizeMb * MB, modified: age === null ? null : now() - age, needsAdmin, target });
+  const path = (p: string) => ({ kind: 'path' as const, path: p });
+  const key = (k: string) => ({ kind: 'registryKey' as const, key: k });
+  const uninstall = 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OldGame';
+  return [
+    it('app', key(uninstall), uninstall, '“Old Game” is listed as installed, but its uninstaller and folder are gone', 'high', null, null, true),
+    it('startup', startup.find((i) => i.name === 'RazerCentral')!.removal, 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run\\RazerCentral', '“RazerCentral” starts a program that no longer exists', 'high', null, null, true),
+    it('service', { kind: 'service', name: 'AdobeARMservice' }, 'Service AdobeARMservice', 'Service “Adobe Acrobat Update Service” runs a program that no longer exists', 'high', null, null, true),
+    it('shortcut', path('C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk'), 'C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Razer Synapse.lnk', 'Points to C:\\Program Files (x86)\\Razer\\Synapse3\\Razer Synapse.exe, which no longer exists', 'high', 0.002, 2 * YEAR, true),
+    it('environment', { kind: 'pathEntry', scope: 'user', entry: 'C:\\Tools\\old-sdk\\bin' }, 'User PATH: C:\\Tools\\old-sdk\\bin', 'In your PATH, but the folder no longer exists', 'high', null, null),
+    it('folder', path('C:\\ProgramData\\Razer'), 'C:\\ProgramData\\Razer', 'Empty folder that no installed app uses', 'medium', 0, 2 * YEAR, true),
+    it('registry', key('HKCU\\Software\\Razer'), 'HKCU\\Software\\Razer', 'Empty settings key that no installed app uses', 'medium', null, 2 * YEAR),
+    it('folder', path('C:\\Users\\you\\AppData\\Roaming\\Ravenswatch'), 'C:\\Users\\you\\AppData\\Roaming\\Ravenswatch', 'No installed app matches this folder', 'low', 124, 1.4 * YEAR),
+    it('folder', path('C:\\Program Files\\OldTool'), 'C:\\Program Files\\OldTool', 'No installed app is registered for this folder – it may be a portable app', 'low', 38, 3 * YEAR, true),
+    it('registry', key('HKCU\\Software\\Passtech Games'), 'HKCU\\Software\\Passtech Games', 'Settings of an app that isn\'t installed', 'low', null, 1.4 * YEAR),
+  ];
+}
+
+let orphans: Leftover[] | null = null;
+
 const sameTarget = (a: Removal['target'], b: Removal['target']) => JSON.stringify(a) === JSON.stringify(b);
 
 function remove(title: string, items: Removal[]): RemoveReport {
   const gone = (t: Removal['target']) => items.some((i) => sameTarget(i.target, t));
+  const before = orphans ?? orphanSample();
   startup = startup.filter((i) => !gone(i.removal));
   services = services.filter((i) => !gone(i.removal));
   tasks = tasks.filter((i) => !gone(i.removal));
+  orphans = before.filter((l) => !gone(l.target));
   const id = `${now()}-${batches.length}`;
   if (settings.safety.quarantine) {
     batches = [{ id, title, createdAt: now(), items: items.map((i) => ({ label: i.label, target: i.target, sizeBytes: i.sizeBytes ?? 0, note: null })) }, ...batches];
@@ -192,7 +228,7 @@ const extraDelay = Number(new URLSearchParams(window.location.search).get('delay
 
 export async function fixture<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const atStart = command === 'environment' || command === 'get_settings';
-  const slow = command === 'scan_cleanup' || command === 'scan_leftovers' || command === 'create_restore_point' || command === 'clean_caches';
+  const slow = ['scan_cleanup', 'scan_leftovers', 'scan_orphans', 'create_restore_point', 'clean_caches'].includes(command);
   await delay(atStart ? 50 : (slow ? 1200 : 250) + extraDelay);
   const result = ((): unknown => {
     switch (command) {
@@ -213,6 +249,7 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
         return done;
       }
       case 'scan_leftovers': return leftoversOf(args?.app as AppRef);
+      case 'scan_orphans': return { items: (orphans ??= orphanSample()), needsAdmin: !environment.elevated } satisfies OrphanScan;
       case 'remove_items': return remove(args?.title as string, args?.items as Removal[]);
       case 'list_quarantine': return batches;
       case 'restore_batch': {

@@ -27,19 +27,28 @@ export type Target =
   | { kind: 'registryKey'; key: string }
   | { kind: 'registryValue'; key: string; name: string }
   | { kind: 'service'; name: string }
-  | { kind: 'task'; path: string };
+  | { kind: 'task'; path: string }
+  | { kind: 'pathEntry'; scope: 'user' | 'machine'; entry: string };
 
 export type Confidence = 'high' | 'medium' | 'low';
 
 export interface Leftover {
   id: string;
-  kind: 'folder' | 'file' | 'shortcut' | 'registry' | 'service' | 'task' | 'startup';
+  kind: 'app' | 'folder' | 'file' | 'shortcut' | 'registry' | 'service' | 'task' | 'startup' | 'environment';
   label: string;
   reason: string;
   confidence: Confidence;
   sizeBytes: number | null;
+  /** When it last changed, as Unix time in seconds. */
+  modified: number | null;
   needsAdmin: boolean;
   target: Target;
+}
+
+export interface OrphanScan {
+  items: Leftover[];
+  /** Scheduled tasks need administrator rights to read. */
+  needsAdmin: boolean;
 }
 
 /** What the leftover scan needs to know about the app it follows. */

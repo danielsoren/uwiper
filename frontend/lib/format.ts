@@ -12,6 +12,16 @@ export function plural(n: number, one: string, many: string): string {
   return `${n.toLocaleString('en-US')} ${n === 1 ? one : many}`;
 }
 
+/** "today", "3 weeks ago", "2 years ago" – roughly, for a Unix time in seconds. */
+export function ago(unixSeconds: number): string {
+  const days = Math.floor((Date.now() / 1000 - unixSeconds) / 86_400);
+  if (days < 1) return 'today';
+  if (days < 14) return plural(days, 'day', 'days') + ' ago';
+  if (days < 60) return plural(Math.round(days / 7), 'week', 'weeks') + ' ago';
+  if (days < 365) return plural(Math.round(days / 30), 'month', 'months') + ' ago';
+  return plural(Math.round(days / 365), 'year', 'years') + ' ago';
+}
+
 /** "today", "yesterday", "3 days ago" for a Unix time in seconds. */
 export function daysAgo(unixSeconds: number): string {
   const days = Math.floor((Date.now() / 1000 - unixSeconds) / 86_400);

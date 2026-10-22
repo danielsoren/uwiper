@@ -10,7 +10,7 @@ const META: Record<DataDirKey, { label: string; sub: string }> = {
   quarantine: { label: 'Quarantine', sub: 'Removed files plus .reg backups of deleted registry keys' },
   snapshots: { label: 'Install snapshots', sub: 'What each tracked installer created' },
   logs: { label: 'Logs', sub: 'What UWiper did and when' },
-  temp: { label: 'Temporary files', sub: 'Emptied every time UWiper closes' },
+  temp: { label: 'Temporary files', sub: "Reserved for UWiper's own scratch files – nothing is kept there yet" },
 };
 
 /** Stands in for the data folder rows until their sizes are known. */

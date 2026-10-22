@@ -15,6 +15,7 @@ const TARGET_ICON: Record<Target['kind'], IconName> = {
   registryValue: 'power',
   service: 'cog',
   task: 'calendar',
+  pathEntry: 'code',
 };
 
 function BatchCard({
