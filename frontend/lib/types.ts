@@ -97,7 +97,13 @@ export interface Batch {
 
 export interface CleanReport {
   freedBytes: number;
+  /** In use by an app. */
   skippedFiles: number;
+  /** Windows wouldn't let UWiper delete them. */
+  deniedFiles: number;
+  failedFiles: number;
+  /** Folders left alone because they lead through a link or junction. */
+  skippedLinks: number;
 }
 
 export interface RestorePoint {

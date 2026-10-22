@@ -72,8 +72,8 @@ let apps: InstalledApp[] = [
 
 let cleanup: CleanupItem[] = [
   { id: 'temp', group: 'windows', name: 'Temporary files', description: '%TEMP% and Windows\\Temp', defaultOn: true, detected: false, sizeBytes: 1340 * MB, fileCount: 18211, paths: ['C:\\Users\\you\\AppData\\Local\\Temp', 'C:\\Windows\\Temp'] },
-  { id: 'windows-update', group: 'windows', name: 'Windows Update cache', description: 'Downloaded packages for updates that are already installed', defaultOn: true, detected: false, sizeBytes: 860 * MB, fileCount: 412, paths: ['C:\\Windows\\SoftwareDistribution\\Download'] },
-  { id: 'crash-dumps', group: 'windows', name: 'Crash reports & memory dumps', description: 'Windows Error Reporting, minidumps', defaultOn: true, detected: false, sizeBytes: 412 * MB, fileCount: 37, paths: ['C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive'] },
+  { id: 'windows-update', group: 'windows', name: 'Windows Update downloads', description: 'Update packages Windows downloaded – only clean them when no update is waiting to install', defaultOn: false, detected: false, sizeBytes: 860 * MB, fileCount: 412, paths: ['C:\\Windows\\SoftwareDistribution\\Download'] },
+  { id: 'crash-dumps', group: 'windows', name: 'Crash reports & memory dumps', description: 'Kept to find out why something crashed – nothing rebuilds them', defaultOn: false, detected: false, sizeBytes: 412 * MB, fileCount: 37, paths: ['C:\\ProgramData\\Microsoft\\Windows\\WER\\ReportArchive'] },
   { id: 'thumbnails', group: 'windows', name: 'Thumbnail cache', description: 'Explorer previews, rebuilt on demand', defaultOn: true, detected: false, sizeBytes: 96 * MB, fileCount: 12, paths: ['C:\\Users\\you\\AppData\\Local\\Microsoft\\Windows\\Explorer\\thumbcache_256.db'] },
   { id: 'chrome', group: 'browsers', name: 'Google Chrome – cache', description: 'Cookies, passwords and history are never touched', defaultOn: true, detected: false, sizeBytes: 420 * MB, fileCount: 5120, paths: ['C:\\Users\\you\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache'] },
   { id: 'edge', group: 'browsers', name: 'Microsoft Edge – cache', description: 'Cookies, passwords and history are never touched', defaultOn: true, detected: false, sizeBytes: 180 * MB, fileCount: 2210, paths: ['C:\\Users\\you\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache'] },
@@ -401,7 +401,7 @@ export async function fixture<T>(command: string, args?: Record<string, unknown>
         const ids = args?.ids as string[];
         const freedBytes = cleanup.filter((c) => ids.includes(c.id)).reduce((s, c) => s + c.sizeBytes, 0);
         cleanup = cleanup.map((c) => (ids.includes(c.id) ? { ...c, sizeBytes: 0, fileCount: 0 } : c));
-        return { freedBytes: Math.round(freedBytes * 0.94), skippedFiles: 37 };
+        return { freedBytes: Math.round(freedBytes * 0.94), skippedFiles: 37, deniedFiles: 0, failedFiles: 0, skippedLinks: 0 };
       }
       default: throw new Error('Not available in the browser preview');
     }

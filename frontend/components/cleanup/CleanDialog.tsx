@@ -88,10 +88,16 @@ export function CleanDialog({ items, onClose }: { items: CleanupItem[]; onClose:
           <Icon name="check" size={28} stroke={2.4} />
         </span>
         <h2 className="text-h2 font-bold">{report.freedBytes > 0 ? `${formatBytes(report.freedBytes)} freed` : 'Nothing to free'}</h2>
-        {report.skippedFiles > 0 && (
+        {report.skippedFiles + report.deniedFiles + report.failedFiles + report.skippedLinks > 0 && (
           <Note>
-            {plural(report.skippedFiles, 'file was', 'files were')} in use and skipped. Closing the apps that use them and cleaning
-            again gets the rest.
+            {[
+              report.skippedFiles > 0 && `${plural(report.skippedFiles, 'file was', 'files were')} in use – close the apps that use them and clean again.`,
+              report.deniedFiles > 0 && `Windows didn't let UWiper delete ${plural(report.deniedFiles, 'file', 'files')}.`,
+              report.failedFiles > 0 && `${plural(report.failedFiles, 'file', 'files')} couldn't be deleted.`,
+              report.skippedLinks > 0 && `${plural(report.skippedLinks, 'folder was', 'folders were')} left alone: ${report.skippedLinks > 1 ? 'they lead' : 'it leads'} through a link elsewhere.`,
+            ]
+              .filter(Boolean)
+              .join(' ')}
           </Note>
         )}
       </div>
